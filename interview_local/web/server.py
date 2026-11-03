@@ -44,19 +44,17 @@ class RangeNotSatisfiable(ValueError):
     """The requested byte range lies outside the file."""
 
 
-def serve(runs_root: Path, open_browser: bool) -> None:
-    """Serve the web UI on an ephemeral loopback port until Ctrl+C.
+def serve(runs_root: Path) -> None:
+    """Serve the web UI on an ephemeral loopback port and open it in the browser; stop on Ctrl+C.
 
     Args:
         runs_root: Directory that holds one subdirectory per run.
-        open_browser: Whether to open the UI in the default browser.
     """
     runs_root.mkdir(parents=True, exist_ok=True)
     server = EditorServer(runs_root)
     url = f"http://{LOOPBACK_HOST}:{server.server_address[1]}/"
     print(f"Interview Local web UI: {url}\nRuns are saved in {runs_root}. Press Ctrl+C to stop.", flush=True)
-    if open_browser:
-        webbrowser.open(url)
+    webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -211,10 +209,7 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
             if self.state.job_running():
                 raise HttpError(HTTPStatus.CONFLICT, "A transcription is already running. Wait until it finishes.")
             extension = audio_extension(urllib.parse.unquote(self.headers.get(AUDIO_FILENAME_HEADER, "")))
-            query = self._query()
-            names = {"A": query.get("name_a", "").strip(), "B": query.get("name_b", "").strip()}
-            if not all(names.values()):
-                raise ValueError("Enter a name for both speakers.")
+            names = self._requested_speaker_names()
             length = self._content_length()
             run_dir = create_run_dir(self.state.runs_root)
             audio = run_dir / f"{STORED_AUDIO_STEM}{extension}"
@@ -229,6 +224,13 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         finally:
             self.state.upload_lock.release()
         self._send_json(HTTPStatus.ACCEPTED, {"job_id": job.job_id, "run_id": run_dir.name})
+
+    def _requested_speaker_names(self) -> dict[str, str]:
+        query = self._query()
+        names = {"A": query.get("name_a", "").strip(), "B": query.get("name_b", "").strip()}
+        if not all(names.values()):
+            raise ValueError("Enter a name for both speakers.")
+        return names
 
     def _content_length(self) -> int:
         header = self.headers.get("Content-Length")
@@ -330,7 +332,7 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
 
     def _send_export(self, run_id: str, export: str) -> None:
         suffix, markdown, content_type = EXPORT_FORMATS[export]
-        text = corrected_text(self._document(run_id), markdown=markdown)
+        text = corrected_text(self._document(run_id)["paragraphs"], markdown=markdown)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Disposition", f'attachment; filename="{run_id}_corrected.{suffix}"')
         body = text.encode("utf-8")

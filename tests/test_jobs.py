@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from interview_local.web.jobs import TranscriptionJob
+from interview_local.web.jobs import TranscriptionJob, diarization_token
 from run_fixtures import ScriptedClient
 
 JOB_TIMEOUT_SECONDS = 10
@@ -35,6 +35,17 @@ def local_llm():
     return ScriptedClient([(0, 1, "A", "Guten Tag.")])
 
 
+class FailingClient(ScriptedClient):
+    """A local LLM that is reachable but fails while drafting."""
+
+    def chat(self, instruction, data, schema):
+        raise RuntimeError("LLM draft failed: model unavailable")
+
+
+def failing_llm():
+    return FailingClient([])
+
+
 def finished(job):
     deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
     while job.running and time.monotonic() < deadline:
@@ -53,30 +64,64 @@ class TranscriptionJobTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def run_job(self, failing_stage=None):
+    def run_job(self, failing_stage=None, llm=local_llm):
         with (patch("interview_local.pipeline.worker", speech_models(failing_stage)),
-              patch("interview_local.web.jobs.OllamaClient", local_llm),
+              patch("interview_local.web.jobs.OllamaClient", llm),
               patch.dict(os.environ, {"HF_TOKEN": "hf_test"})):
             job = TranscriptionJob(self.run_dir, self.audio, {"A": "Anna", "B": "Bernd"})
             job.start()
             return finished(job)
 
-    def test_successful_job_writes_all_stages_with_names(self):
+    def saved_readable(self):
+        return json.loads((self.run_dir / "03_readable.json").read_text(encoding="utf-8"))
+
+    def test_successful_job_finishes_in_the_llm_phase(self):
         status = self.run_job()
         self.assertEqual((status.state, status.phase, status.error), ("done", "llm", None))
-        readable = json.loads((self.run_dir / "03_readable.json").read_text(encoding="utf-8"))
-        self.assertEqual(readable["speakers"]["A"], "Anna")
-        self.assertEqual([w["probability"] for w in readable["source_transcript"]["words"]], [.9, .4])
+
+    def test_successful_job_saves_the_entered_speaker_names(self):
+        self.run_job()
+        self.assertEqual(self.saved_readable()["speakers"], {"A": "Anna", "B": "Bernd"})
+
+    def test_successful_job_keeps_the_whisper_word_probabilities(self):
+        self.run_job()
+        self.assertEqual([w["probability"] for w in self.saved_readable()["source_transcript"]["words"]], [.9, .4])
 
     def test_speech_recognition_failure_is_reported_in_its_phase(self):
         status = self.run_job(failing_stage="asr")
-        self.assertEqual((status.state, status.phase), ("failed", "speech_recognition"))
-        self.assertIn("model unavailable", status.error)
+        self.assertEqual((status.state, status.phase, "model unavailable" in status.error),
+                         ("failed", "speech_recognition", True))
 
     def test_speaker_recognition_failure_is_reported_in_its_phase(self):
         status = self.run_job(failing_stage="diarize")
-        self.assertEqual((status.state, status.phase), ("failed", "speaker_recognition"))
-        self.assertIn("model unavailable", status.error)
+        self.assertEqual((status.state, status.phase, "model unavailable" in status.error),
+                         ("failed", "speaker_recognition", True))
+
+    def test_llm_failure_is_reported_in_its_phase(self):
+        status = self.run_job(llm=failing_llm)
+        self.assertEqual((status.state, status.phase, "model unavailable" in status.error),
+                         ("failed", "llm", True))
+
+
+class DiarizationTokenTests(unittest.TestCase):
+    def token_with(self, local_model, environment, cached_login):
+        with (patch("interview_local.models.local_diarization_model", lambda: local_model),
+              patch.dict(os.environ, environment, clear=True),
+              patch("huggingface_hub.get_token", lambda: cached_login)):
+            return diarization_token()
+
+    def test_local_model_needs_no_token(self):
+        self.assertIsNone(self.token_with(Path("models/community-1"), {"HF_TOKEN": "hf_env"}, "hf_cached"))
+
+    def test_environment_token_is_preferred_over_the_cached_login(self):
+        self.assertEqual(self.token_with(None, {"HF_TOKEN": "hf_env"}, "hf_cached"), "hf_env")
+
+    def test_cached_login_is_used_without_environment_token(self):
+        self.assertEqual(self.token_with(None, {}, "hf_cached"), "hf_cached")
+
+    def test_missing_credentials_fail_instead_of_prompting(self):
+        with self.assertRaises(RuntimeError):
+            self.token_with(None, {}, None)
 
 
 if __name__ == "__main__":

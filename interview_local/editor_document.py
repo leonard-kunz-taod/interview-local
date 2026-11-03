@@ -31,10 +31,10 @@ def build_editor_document(readable: dict, paragraphs: list[CorrectedParagraph], 
         raise ValueError("This run was transcribed before word probabilities were stored "
                          "and cannot be opened in the editor. Transcribe the audio again.")
     return dict(speakers=dict(speakers), low_asr_probability=LOW_ASR_PROBABILITY,
-                paragraphs=[_editor_paragraph(readable, words, p, speakers) for p in paragraphs])
+                paragraphs=[_editor_paragraph(readable["paragraphs"], words, p, speakers) for p in paragraphs])
 
 
-def _editor_paragraph(readable: dict, words: list[dict], paragraph: CorrectedParagraph,
+def _editor_paragraph(readable_paragraphs: list[dict], words: list[dict], paragraph: CorrectedParagraph,
                       speakers: dict[str, str]) -> dict:
     paragraph_words = words[paragraph.first_word:paragraph.last_word + 1]
     start = min(w["start"] for w in paragraph_words)
@@ -44,15 +44,16 @@ def _editor_paragraph(readable: dict, words: list[dict], paragraph: CorrectedPar
         speaker_name=speakers[paragraph.speaker] if paragraph.speaker is not None else UNASSIGNED_NAME,
         start=start, end=max(w["end"] for w in paragraph_words), text=paragraph.text,
         text_edited=paragraph.text_edited, speaker_edited=paragraph.speaker_edited,
-        speaker_uncertainty=speaker_uncertainty(readable, paragraph_words, paragraph),
+        speaker_uncertainty=speaker_uncertainty(readable_paragraphs, paragraph_words, paragraph),
         words=_editor_words(display_words, words, start))
 
 
-def speaker_uncertainty(readable: dict, paragraph_words: list[dict], paragraph: CorrectedParagraph) -> list[str]:
+def speaker_uncertainty(readable_paragraphs: list[dict], paragraph_words: list[dict],
+                        paragraph: CorrectedParagraph) -> list[str]:
     """Reasons to review a paragraph's speaker; a manual reassignment clears them.
 
     Args:
-        readable: The parsed 03_readable.json content.
+        readable_paragraphs: The LLM paragraphs of the parsed 03_readable.json content.
         paragraph_words: The source words of the paragraph.
         paragraph: The corrected paragraph.
 
@@ -65,13 +66,13 @@ def speaker_uncertainty(readable: dict, paragraph_words: list[dict], paragraph: 
                if reason in SPEAKER_UNCERTAINTY_REASONS}
     if paragraph.speaker is None:
         reasons.add("unassigned")
-    if _readable_paragraph_containing(readable, paragraph.first_word)["speaker_changed"]:
+    if _readable_paragraph_containing(readable_paragraphs, paragraph.first_word)["speaker_changed"]:
         reasons.add("speaker_changed_by_llm")
     return sorted(reasons)
 
 
-def _readable_paragraph_containing(readable: dict, word_id: int) -> dict:
-    for readable_paragraph in readable["paragraphs"]:
+def _readable_paragraph_containing(readable_paragraphs: list[dict], word_id: int) -> dict:
+    for readable_paragraph in readable_paragraphs:
         if word_id in readable_paragraph["source_word_ids"]:
             return readable_paragraph
     raise ValueError(f"Word {word_id} belongs to no readable paragraph.")

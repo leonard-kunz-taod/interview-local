@@ -4,10 +4,9 @@ import unittest
 
 from interview_local.artifacts import corrected_text
 from interview_local.core import Turn
-from interview_local.corrections import (edit_paragraph_text, load_corrected_paragraphs, readable_source_words,
-                                         reassign_words)
+from interview_local.corrections import edit_paragraph_text, load_corrected_paragraphs
 from interview_local.editor_document import LOW_ASR_PROBABILITY, build_editor_document
-from run_fixtures import INTERVIEW_TURNS, TWO_PARAGRAPHS, interview_words, readable_transcript
+from run_fixtures import INTERVIEW_TURNS, TWO_PARAGRAPHS, interview_words, readable_transcript, reassign
 
 NAMES = {"A": "Anna", "B": "Bernd"}
 NO_CORRECTIONS = Path("/nonexistent-run")
@@ -18,16 +17,11 @@ def document_of(readable, paragraphs=None):
     return build_editor_document(readable, paragraphs, NAMES)
 
 
-def reassign(readable, paragraphs, first_word, last_word, speaker):
-    return reassign_words(paragraphs, readable_source_words(readable), set(readable["speakers"]),
-                          first_word, last_word, speaker)
-
-
 class ParagraphTests(unittest.TestCase):
-    def test_paragraph_shows_speaker_name_and_source_time_range(self):
+    def test_paragraph_shows_speaker_name_source_time_range_and_text(self):
         paragraph = document_of(readable_transcript(TWO_PARAGRAPHS))["paragraphs"][1]
-        self.assertEqual((paragraph["speaker_name"], paragraph["start"], paragraph["end"]), ("Bernd", 5, 7))
-        self.assertEqual(paragraph["text"], "Danke, gut. Und selbst?")
+        self.assertEqual((paragraph["speaker_name"], paragraph["start"], paragraph["end"], paragraph["text"]),
+                         ("Bernd", 5, 7, "Danke, gut. Und selbst?"))
 
     def test_clean_paragraphs_have_no_speaker_uncertainty(self):
         document = document_of(readable_transcript(TWO_PARAGRAPHS))
@@ -41,8 +35,11 @@ class ParagraphTests(unittest.TestCase):
     def test_unassigned_paragraph_is_a_speaker_uncertainty(self):
         readable = readable_transcript([(0, 3, None, "Guten Tag, wie geht's?"), TWO_PARAGRAPHS[1]])
         paragraph = document_of(readable)["paragraphs"][0]
-        self.assertEqual(paragraph["speaker_name"], "Unassigned")
         self.assertIn("unassigned", paragraph["speaker_uncertainty"])
+
+    def test_unassigned_paragraph_is_named_unassigned(self):
+        readable = readable_transcript([(0, 3, None, "Guten Tag, wie geht's?"), TWO_PARAGRAPHS[1]])
+        self.assertEqual(document_of(readable)["paragraphs"][0]["speaker_name"], "Unassigned")
 
     def test_speaker_changed_by_llm_is_a_speaker_uncertainty(self):
         readable = readable_transcript([TWO_PARAGRAPHS[0], (4, 7, "A", "Danke, gut. Und selbst?")])
@@ -106,19 +103,26 @@ class WordTests(unittest.TestCase):
             document_of(readable)
 
 
+def corrected_uncertain_document():
+    """A document with an uncertain-speaker paragraph whose text was edited by hand."""
+    regular = INTERVIEW_TURNS + [Turn(5.4, 6.1, "first")]
+    readable = readable_transcript(TWO_PARAGRAPHS, regular_turns=regular)
+    paragraphs = edit_paragraph_text(load_corrected_paragraphs(NO_CORRECTIONS, readable), 4, "Danke, sehr gut.")
+    return document_of(readable, paragraphs)
+
+
 class CorrectedExportTests(unittest.TestCase):
-    def test_export_lists_speaker_time_range_and_text_without_markers(self):
-        regular = INTERVIEW_TURNS + [Turn(5.4, 6.1, "first")]
-        readable = readable_transcript(TWO_PARAGRAPHS, regular_turns=regular)
-        paragraphs = edit_paragraph_text(load_corrected_paragraphs(NO_CORRECTIONS, readable), 4, "Danke, sehr gut.")
-        text = corrected_text(document_of(readable, paragraphs), markdown=True)
-        self.assertEqual(text.splitlines()[:7], ["# Corrected transcript", "",
-                                                 "### Anna · 00:00:00.000–00:00:02.000", "",
-                                                 "Guten Tag, wie geht's?", "",
-                                                 "### Bernd · 00:00:05.000–00:00:07.000"])
-        self.assertIn("Danke, sehr gut.", text)
-        self.assertNotIn("UNCERTAIN", text.upper())
-        self.assertNotIn("#", corrected_text(document_of(readable, paragraphs), markdown=False))
+    def test_markdown_export_lists_speaker_time_range_and_corrected_text_without_markers(self):
+        expected = ("# Corrected transcript\n\n"
+                    "### Anna · 00:00:00.000–00:00:02.000\n\nGuten Tag, wie geht's?\n\n"
+                    "### Bernd · 00:00:05.000–00:00:07.000\n\nDanke, sehr gut.\n")
+        self.assertEqual(corrected_text(corrected_uncertain_document()["paragraphs"], markdown=True), expected)
+
+    def test_text_export_lists_speaker_time_range_and_corrected_text_without_markers(self):
+        expected = ("Corrected transcript\n\n"
+                    "Anna · 00:00:00.000–00:00:02.000\n\nGuten Tag, wie geht's?\n\n"
+                    "Bernd · 00:00:05.000–00:00:07.000\n\nDanke, sehr gut.\n")
+        self.assertEqual(corrected_text(corrected_uncertain_document()["paragraphs"], markdown=False), expected)
 
 
 if __name__ == "__main__":

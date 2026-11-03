@@ -87,11 +87,10 @@ def main():
     modes.add_argument("--raw-only", action="store_true", help="Speech-to-text only; no diarization, LLM or HF account")
     parser.add_argument("--no-llm", action="store_true", help="Stop after the preserved speaker transcript")
     args = parser.parse_args()
-    runs_root = args.runs_dir.expanduser().resolve()
     try:
         if args.web:
             from .web.server import serve
-            serve(runs_root, open_browser=True)
+            serve(args.runs_dir.expanduser().resolve())
             return 0
         if args.audio and (args.rename or args.enhance or args.review):
             raise ValueError("Supply audio or a saved-stage command, not both.")

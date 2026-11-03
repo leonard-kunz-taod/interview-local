@@ -4,14 +4,8 @@ import tempfile
 import unittest
 
 from interview_local.corrections import (CorrectedParagraph, edit_paragraph_text, load_corrected_paragraphs,
-                                         load_speaker_names, readable_source_words, reassign_words,
-                                         save_corrections)
-from run_fixtures import TWO_PARAGRAPHS, readable_transcript
-
-
-def reassign(readable, paragraphs, first_word, last_word, speaker):
-    return reassign_words(paragraphs, readable_source_words(readable), set(readable["speakers"]),
-                          first_word, last_word, speaker)
+                                         load_speaker_names, save_corrections)
+from run_fixtures import TWO_PARAGRAPHS, readable_transcript, reassign
 
 
 def summary(paragraphs):
@@ -31,13 +25,29 @@ class LoadAndSaveTests(unittest.TestCase):
         paragraphs = load_corrected_paragraphs(self.run_dir, self.readable)
         self.assertEqual(summary(paragraphs), [(0, 3, "A", "Guten Tag, wie geht's?", False),
                                                (4, 7, "B", "Danke, gut. Und selbst?", False)])
+
+    def test_without_corrections_the_readable_speaker_names_are_used(self):
         self.assertEqual(load_speaker_names(self.run_dir, self.readable), {"A": "Anna", "B": "Bernd"})
 
-    def test_saved_corrections_load_again(self):
+    def test_saved_paragraphs_load_again(self):
         paragraphs = edit_paragraph_text(load_corrected_paragraphs(self.run_dir, self.readable), 4, "Danke, sehr gut.")
-        save_corrections(self.run_dir, self.readable, {"A": "Bernd", "B": "Anna"}, paragraphs)
+        save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, paragraphs)
         self.assertEqual(load_corrected_paragraphs(self.run_dir, self.readable), paragraphs)
+
+    def test_saved_speaker_names_load_again(self):
+        save_corrections(self.run_dir, self.readable, {"A": "Bernd", "B": "Anna"},
+                         load_corrected_paragraphs(self.run_dir, self.readable))
         self.assertEqual(load_speaker_names(self.run_dir, self.readable), {"A": "Bernd", "B": "Anna"})
+
+    def test_saving_an_empty_speaker_name_is_rejected(self):
+        with self.assertRaises(ValueError):
+            save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": " "},
+                             load_corrected_paragraphs(self.run_dir, self.readable))
+
+    def test_corrections_file_of_another_schema_is_rejected(self):
+        (self.run_dir / "corrections.json").write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_corrected_paragraphs(self.run_dir, self.readable)
 
     def test_corrections_of_a_changed_readable_transcript_are_rejected(self):
         save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"},
@@ -62,11 +72,15 @@ class LoadAndSaveTests(unittest.TestCase):
             save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, paragraphs)
         self.assertFalse((self.run_dir / "corrections.json").exists())
 
-    def test_stage_files_stay_unchanged_by_corrections(self):
+    def test_saving_leaves_the_readable_transcript_unchanged(self):
         before = json.dumps(self.readable, sort_keys=True)
         save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"},
                          load_corrected_paragraphs(self.run_dir, self.readable))
         self.assertEqual(json.dumps(self.readable, sort_keys=True), before)
+
+    def test_saving_writes_only_corrections_json(self):
+        save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"},
+                         load_corrected_paragraphs(self.run_dir, self.readable))
         self.assertEqual([p.name for p in self.run_dir.iterdir()], ["corrections.json"])
 
 
@@ -75,10 +89,9 @@ class EditTextTests(unittest.TestCase):
         self.paragraphs = [CorrectedParagraph(0, 3, "A", "Guten Tag", False, False),
                            CorrectedParagraph(4, 7, "B", "Danke", False, False)]
 
-    def test_edit_replaces_the_text_and_marks_it_edited(self):
+    def test_edit_replaces_only_that_text_and_marks_it_edited(self):
         edited = edit_paragraph_text(self.paragraphs, 4, " Danke schön ")
-        self.assertEqual((edited[1].text, edited[1].text_edited), ("Danke schön", True))
-        self.assertEqual(edited[0], self.paragraphs[0])
+        self.assertEqual(edited, [self.paragraphs[0], CorrectedParagraph(4, 7, "B", "Danke schön", True, False)])
 
     def test_empty_text_is_rejected(self):
         for text in ("", "   ", " – ?"):
@@ -121,7 +134,8 @@ class ReassignTests(unittest.TestCase):
     def test_inserted_word_goes_with_its_preceding_source_word(self):
         paragraphs = edit_paragraph_text(self.paragraphs, 4, "Danke, sehr gut. Und selbst?")
         result = reassign(self.readable, paragraphs, 4, 4, "A")
-        self.assertEqual(summary(result)[1:3], [(4, 4, "A", "Danke, sehr", True), (5, 7, "B", "gut. Und selbst?", False)])
+        self.assertEqual(summary(result)[1:3], [(4, 4, "A", "Danke, sehr", True),
+                                                (5, 7, "B", "gut. Und selbst?", False)])
 
     def test_range_without_remaining_text_joins_the_selection(self):
         paragraphs = edit_paragraph_text(self.paragraphs, 4, "gut. Und selbst?")

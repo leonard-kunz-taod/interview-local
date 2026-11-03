@@ -19,7 +19,6 @@ PHASE_LLM = "llm"
 @dataclass(frozen=True)
 class JobStatus:
     """A snapshot of a job's progress for the browser."""
-    job_id: str
     run_id: str
     state: str
     phase: str
@@ -48,7 +47,7 @@ class TranscriptionJob:
     def status(self) -> JobStatus:
         """Return the current progress snapshot."""
         with self._lock:
-            return JobStatus(job_id=self.job_id, run_id=self.run_dir.name, state=self._state,
+            return JobStatus(run_id=self.run_dir.name, state=self._state,
                              phase=self._phase, detail=self._detail, error=self._error)
 
     @property

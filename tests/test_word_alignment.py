@@ -24,21 +24,17 @@ class AlignTextToSourceTests(unittest.TestCase):
 
     def test_replaced_word_keeps_its_source_and_original_text(self):
         words = align_text_to_source("Guten Morgen", source("Guten", "Tag"))
-        self.assertEqual(words[1].change, "replaced")
-        self.assertEqual(words[1].source_word_ids, (11,))
-        self.assertEqual(words[1].original_text, "Tag")
+        self.assertEqual((words[1].change, words[1].source_word_ids, words[1].original_text),
+                         ("replaced", (11,), "Tag"))
 
-    def test_inserted_word_has_no_source(self):
+    def test_inserted_word_has_no_source_and_leaves_its_neighbours_unchanged(self):
         words = align_text_to_source("Guten lieben Tag", source("Guten", "Tag"))
-        self.assertEqual(words[1].change, "inserted")
-        self.assertEqual(words[1].source_word_ids, ())
-        self.assertEqual(words[1].original_text, "")
-        self.assertEqual(words[2].change, "unchanged")
+        self.assertEqual([(w.change, w.source_word_ids, w.original_text) for w in words],
+                         [("unchanged", (10,), "Guten"), ("inserted", (), ""), ("unchanged", (11,), "Tag")])
 
     def test_deleted_word_is_reported_before_the_next_word(self):
         words = align_text_to_source("Guten Tag", source("Guten", "äh", "Tag"))
-        self.assertEqual(words[1].removed_before, "äh")
-        self.assertEqual([w.change for w in words], ["unchanged", "unchanged"])
+        self.assertEqual([(w.change, w.removed_before) for w in words], [("unchanged", ""), ("unchanged", "äh")])
 
     def test_trailing_deletion_goes_to_the_last_word(self):
         words = align_text_to_source("Guten Tag", source("Guten", "Tag", "ja"))
@@ -46,8 +42,7 @@ class AlignTextToSourceTests(unittest.TestCase):
 
     def test_partly_deleted_source_word_marks_its_display_word_replaced(self):
         words = align_text_to_source("z Beispiel", source("z.B.", "Beispiel"))
-        self.assertEqual(words[0].change, "replaced")
-        self.assertEqual(words[0].original_text, "z.B.")
+        self.assertEqual((words[0].change, words[0].original_text), ("replaced", "z.B."))
 
     def test_punctuation_only_word_attaches_to_the_previous_word(self):
         words = align_text_to_source("Ja – gut", source("Ja", "gut"))

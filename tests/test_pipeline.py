@@ -48,8 +48,9 @@ class DecodeFailureTests(unittest.TestCase):
             fake.write_text("This is not audio.")
             with self.assertRaises(RuntimeError) as raised:
                 worker("decode", fake, Path(d)/"decoded.wav", status=lambda _: None)
-        self.assertIn("could not be read as audio", str(raised.exception))
-        self.assertNotIn("401/403", str(raised.exception))
+        message = str(raised.exception)
+        names_audio_cause_without_login_advice = ("could not be read as audio" in message, "401/403" in message)
+        self.assertEqual(names_audio_cause_without_login_advice, (True, False))
 
 if __name__ == "__main__":
     unittest.main()

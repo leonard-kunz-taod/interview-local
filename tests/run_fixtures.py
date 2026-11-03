@@ -1,5 +1,6 @@
 """Readable (03) transcripts built through the real merge/enhance code with a scripted local LLM."""
 from interview_local.core import Turn, Word, merge
+from interview_local.corrections import readable_source_words, reassign_words
 from interview_local.llm import enhance
 
 
@@ -45,3 +46,9 @@ def readable_transcript(paragraphs, words=None, regular_turns=None):
 
 
 TWO_PARAGRAPHS = [(0, 3, "A", "Guten Tag, wie geht's?"), (4, 7, "B", "Danke, gut. Und selbst?")]
+
+
+def reassign(readable, paragraphs, first_word, last_word, speaker):
+    """Reassign a word range of a readable transcript's corrected paragraphs to a speaker."""
+    return reassign_words(paragraphs, readable_source_words(readable), set(readable["speakers"]),
+                          first_word, last_word, speaker)

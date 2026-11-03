@@ -1,3 +1,4 @@
+from contextlib import redirect_stdout
 from http.client import HTTPResponse
 import io
 import json
@@ -7,8 +8,8 @@ import unittest
 from unittest.mock import patch
 
 from interview_local.artifacts import save_readable
-from interview_local.web.server import (EditorRequestHandler, EditorState, RangeNotSatisfiable,
-                                        parse_byte_range, static_file)
+from interview_local.web.server import (EditorRequestHandler, EditorState, RangeNotSatisfiable, parse_byte_range,
+                                        serve, static_file)
 from run_fixtures import TWO_PARAGRAPHS, readable_transcript
 
 PORT = 8765
@@ -63,6 +64,41 @@ def send_json(server, method, path, value):
     return exchange(server, method, path, json.dumps(value).encode(), {"Content-Type": "application/json"})
 
 
+class InterruptedServer(FakeServer):
+    """A server stand-in that needs no port and is stopped by Ctrl+C at once."""
+
+    def serve_forever(self):
+        raise KeyboardInterrupt
+
+    def server_close(self):
+        pass
+
+
+def interrupted_serve(runs_root):
+    """Run serve until an immediate Ctrl+C; return (printed output, opened browser URLs)."""
+    opened = []
+    output = io.StringIO()
+    with (patch("interview_local.web.server.webbrowser.open", opened.append),
+          patch("interview_local.web.server.EditorServer", InterruptedServer),
+          redirect_stdout(output)):
+        serve(runs_root)
+    return output.getvalue(), opened
+
+
+class ServeTests(unittest.TestCase):
+    def test_browser_opens_the_printed_loopback_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            printed, opened = interrupted_serve(Path(directory))
+        url = f"http://{HOST}/"
+        self.assertEqual((url in printed, opened), (True, [url]))
+
+    def test_missing_runs_directory_is_created(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runs_root = Path(directory) / "runs"
+            interrupted_serve(runs_root)
+            self.assertTrue(runs_root.is_dir())
+
+
 class ByteRangeTests(unittest.TestCase):
     def test_closed_range(self):
         self.assertEqual(parse_byte_range("bytes=10-19", 100), (10, 19))
@@ -96,8 +132,7 @@ class StaticFileTests(unittest.TestCase):
     def test_index_is_served_at_the_root(self):
         with tempfile.TemporaryDirectory() as directory:
             status, response, body = exchange(FakeServer(Path(directory)), "GET", "/")
-        self.assertEqual(status, 200)
-        self.assertIn(b'accept=".wav,.mp3,.m4a"', body)
+        self.assertEqual((status, b'accept=".wav,.mp3,.m4a"' in body), (200, True))
 
 
 class RequestGuardTests(unittest.TestCase):
@@ -146,20 +181,30 @@ class UploadTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 status, _, body = self.upload(filename)
                 self.assertEqual((status, json.loads(body)["error"]), (400, "Please select a WAV, MP3 or M4A file."))
+
+    def test_unsupported_format_creates_no_run(self):
+        self.upload("interview.flac")
         self.assertEqual(list(self.runs_root.iterdir()), [])
 
     def test_missing_speaker_name_is_rejected(self):
         status, _, _ = self.upload("interview.wav", query="name_a=Anna&name_b=")
         self.assertEqual(status, 400)
 
-    def test_supported_upload_is_stored_and_starts_a_job(self):
+    def test_supported_upload_is_stored_as_the_run_source(self):
         with patch("interview_local.web.jobs.TranscriptionJob.start"):
             status, _, body = self.upload("Gespr%C3%A4ch.M4A", body=AUDIO_BYTES)
-        created = json.loads(body)
-        self.assertEqual(status, 202)
-        self.assertEqual((self.runs_root / created["run_id"] / "source.m4a").read_bytes(), AUDIO_BYTES)
-        job_status, _, job = exchange(self.server, "GET", f"/api/jobs/{created['job_id']}")
+        stored = (self.runs_root / json.loads(body)["run_id"] / "source.m4a").read_bytes()
+        self.assertEqual((status, stored), (202, AUDIO_BYTES))
+
+    def test_supported_upload_starts_a_running_job(self):
+        with patch("interview_local.web.jobs.TranscriptionJob.start"):
+            _, _, body = self.upload("interview.wav")
+        job_status, _, job = exchange(self.server, "GET", f"/api/jobs/{json.loads(body)['job_id']}")
         self.assertEqual((job_status, json.loads(job)["state"]), (200, "running"))
+
+    def test_unknown_job_is_not_found(self):
+        status, _, _ = exchange(self.server, "GET", "/api/jobs/unknown")
+        self.assertEqual(status, 404)
 
     def test_second_upload_while_a_job_runs_is_rejected(self):
         with patch("interview_local.web.jobs.TranscriptionJob.start"):
@@ -197,15 +242,14 @@ class EditorApiTests(unittest.TestCase):
     def test_run_without_stored_audio_cannot_be_opened(self):
         (self.run_dir / "source.wav").unlink()
         status, _, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/document")
-        self.assertEqual(status, 409)
-        self.assertIn("audio", json.loads(body)["error"])
+        self.assertEqual((status, "audio" in json.loads(body)["error"]), (409, True))
 
-    def test_text_edit_is_saved_and_reloaded(self):
+    def test_text_edit_is_saved_to_corrections_and_reloaded(self):
         status, _, _ = send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/paragraphs/4/text",
                                  {"text": "Danke, sehr gut."})
-        self.assertEqual(status, 200)
-        self.assertEqual(self.document()["paragraphs"][1]["text"], "Danke, sehr gut.")
-        self.assertTrue((self.run_dir / "corrections.json").is_file())
+        reloaded = self.document()["paragraphs"][1]["text"]
+        saved = (self.run_dir / "corrections.json").is_file()
+        self.assertEqual((status, reloaded, saved), (200, "Danke, sehr gut.", True))
 
     def test_empty_text_edit_is_rejected(self):
         status, _, _ = send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/paragraphs/4/text", {"text": " "})
@@ -214,9 +258,8 @@ class EditorApiTests(unittest.TestCase):
     def test_reassignment_splits_the_paragraph(self):
         status, _, body = send_json(self.server, "POST", f"/api/runs/{RUN_ID}/reassign",
                                     {"first_word": 5, "last_word": 6, "speaker": "A"})
-        self.assertEqual(status, 200)
-        self.assertEqual([p["speaker_name"] for p in json.loads(body)["paragraphs"]],
-                         ["Anna", "Bernd", "Anna", "Bernd"])
+        names = [p["speaker_name"] for p in json.loads(body)["paragraphs"]]
+        self.assertEqual((status, names), (200, ["Anna", "Bernd", "Anna", "Bernd"]))
 
     def test_speaker_names_can_be_swapped(self):
         send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/speakers", {"A": "Bernd", "B": "Anna"})
@@ -233,19 +276,16 @@ class EditorApiTests(unittest.TestCase):
         for export, first_line in (("export.md", "# Corrected transcript"), ("export.txt", "Corrected transcript")):
             with self.subTest(export=export):
                 status, response, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/{export}")
-                self.assertEqual(status, 200)
-                self.assertTrue(response.getheader("Content-Disposition").startswith("attachment"))
                 text = body.decode("utf-8")
-                self.assertEqual(text.splitlines()[0], first_line)
-                self.assertIn("Danke, sehr gut.", text)
+                download = (status, response.getheader("Content-Disposition").startswith("attachment"),
+                            text.splitlines()[0], "Danke, sehr gut." in text)
+                self.assertEqual(download, (200, True, first_line, True))
 
     def test_audio_range_request_returns_partial_content(self):
         status, response, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/audio",
                                           headers={"Range": "bytes=10-19"})
-        self.assertEqual(status, 206)
-        self.assertEqual(body, AUDIO_BYTES[10:20])
-        self.assertEqual(response.getheader("Content-Range"), f"bytes 10-19/{len(AUDIO_BYTES)}")
-        self.assertEqual(response.getheader("Content-Type"), "audio/wav")
+        partial = (status, body, response.getheader("Content-Range"), response.getheader("Content-Type"))
+        self.assertEqual(partial, (206, AUDIO_BYTES[10:20], f"bytes 10-19/{len(AUDIO_BYTES)}", "audio/wav"))
 
     def test_audio_without_range_returns_the_whole_file(self):
         status, _, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/audio")
