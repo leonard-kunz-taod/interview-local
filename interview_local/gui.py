@@ -1,15 +1,23 @@
 """Optional native interface with separate views for all persistent stages."""
-from datetime import datetime
+
 import json
-from pathlib import Path
 import queue
 import threading
 import tkinter as tk
+from datetime import datetime
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from .artifacts import save_readable, save_speakers
-from .core import export
-from .pipeline import process
+
+from .artifacts import save_readable, save_speakers_with_aliases
 from .llm import OllamaClient, enhance, review
+from .pipeline import process
+
+STAGE_VIEWS = {
+    "Raw": "01_raw.txt",
+    "Speakers": "02_speakers.txt",
+    "Readable": "03_readable.txt",
+    "Review": "04_review.txt",
+}
 
 
 def launch():
@@ -26,21 +34,38 @@ def launch():
     offline = tk.BooleanVar()
     alignment = tk.BooleanVar()
     use_llm = tk.BooleanVar(value=True)
-    status = tk.StringVar(value="Ready. Completed stages are saved separately; originals are retained.")
+    status = tk.StringVar(
+        value="Ready. Completed stages are saved separately; originals are retained."
+    )
     frame = ttk.Frame(root, padding=16)
     frame.pack(fill="both", expand=True)
-    ttk.Label(frame, text="Interview Local", font=("Helvetica", 22, "bold")).pack(anchor="w")
+    ttk.Label(frame, text="Interview Local", font=("Helvetica", 22, "bold")).pack(
+        anchor="w"
+    )
     ttk.Entry(frame, textvariable=path).pack(fill="x", pady=8)
+
     def choose():
-        value = filedialog.askopenfilename(filetypes=[("Audio files", "*.wav *.mp3 *.m4a"), ("All files", "*")])
+        value = filedialog.askopenfilename(
+            filetypes=[("Audio files", "*.wav *.mp3 *.m4a"), ("All files", "*")]
+        )
         if value:
             path.set(value)
+
     ttk.Button(frame, text="Choose audio file …", command=choose).pack(anchor="w")
-    ttk.Label(frame, text="Optional HF token: only needed without a complete local community-1 folder").pack(anchor="w", pady=(8,0))
+    ttk.Label(
+        frame,
+        text="Optional HF token: only needed without a complete local community-1 folder",
+    ).pack(anchor="w", pady=(8, 0))
     ttk.Entry(frame, textvariable=token, show="•").pack(fill="x")
-    ttk.Checkbutton(frame, text="Offline speech models (download caches first)", variable=offline).pack(anchor="w")
-    ttk.Checkbutton(frame, text="Additional German word alignment (optional)", variable=alignment).pack(anchor="w")
-    ttk.Checkbutton(frame, text="Create a readable draft with local Ministral", variable=use_llm).pack(anchor="w")
+    ttk.Checkbutton(
+        frame, text="Offline speech models (download caches first)", variable=offline
+    ).pack(anchor="w")
+    ttk.Checkbutton(
+        frame, text="Additional German word alignment (optional)", variable=alignment
+    ).pack(anchor="w")
+    ttk.Checkbutton(
+        frame, text="Create a readable draft with local Ministral", variable=use_llm
+    ).pack(anchor="w")
     names = ttk.Frame(frame)
     names.pack(fill="x", pady=8)
     ttk.Label(names, text="Names for the new run:").pack(side="left")
@@ -49,16 +74,18 @@ def launch():
     notebook = ttk.Notebook(frame)
     notebook.pack(fill="both", expand=True, pady=8)
     views = {}
-    for label in ("Raw", "Speakers", "Readable", "Review"):
-        view = tk.Text(notebook, wrap="word", font=("Helvetica",13))
+    for label in STAGE_VIEWS:
+        view = tk.Text(notebook, wrap="word", font=("Helvetica", 13))
         notebook.add(view, text=label)
         views[label] = view
     ttk.Label(frame, textvariable=status, wraplength=950).pack(anchor="w")
     buttons = ttk.Frame(frame)
     buttons.pack(fill="x", pady=8)
     controls = []
+
     def progress(message):
         events.put(("status", message))
+
     def submit(function):
         nonlocal running
         if running:
@@ -66,64 +93,91 @@ def launch():
         running = True
         for button in controls:
             button.config(state="disabled")
+
         def job():
             try:
                 function()
                 events.put(("done", None))
             except Exception as exc:
                 events.put(("error", str(exc)))
+
         threading.Thread(target=job, daemon=True).start()
+
     def refresh_views():
         if output is None:
             return
-        for label, filename in (("Raw","01_raw.txt"), ("Speakers","02_speakers.txt"),
-                                ("Readable","03_readable.txt"), ("Review","04_review.txt")):
+        for label, filename in STAGE_VIEWS.items():
             file = output / filename
             if file.exists():
-                views[label].delete("1.0","end")
-                views[label].insert("1.0",file.read_text(encoding="utf-8"))
+                views[label].delete("1.0", "end")
+                views[label].insert("1.0", file.read_text(encoding="utf-8"))
+
     def start():
         nonlocal output
         source = Path(path.get()).expanduser()
         if not source.is_file():
             messagebox.showerror("File not found", "Choose an existing audio file.")
             return
-        base = filedialog.askdirectory(title="Choose a parent folder for this run's saved stages")
+        base = filedialog.askdirectory(
+            title="Choose a parent folder for this run's saved stages"
+        )
         if not base:
             return
         output = Path(base) / datetime.now().strftime("interview_%Y-%m-%d_%H-%M-%S-%f")
-        options = dict(token=token.get().strip() or None, offline=offline.get(), alignment=alignment.get())
-        names_snapshot = dict(A=name_a.get().strip() or "Speaker A", B=name_b.get().strip() or "Speaker B")
+        options = {
+            "token": token.get().strip() or None,
+            "offline": offline.get(),
+            "alignment": alignment.get(),
+        }
+        names_snapshot = {
+            "A": name_a.get().strip() or "Speaker A",
+            "B": name_b.get().strip() or "Speaker B",
+        }
         edit_enabled = use_llm.get()
         for view in views.values():
-            view.delete("1.0","end")
+            view.delete("1.0", "end")
+
         def job():
             if edit_enabled:
                 OllamaClient().ready()
             result = process(source, status=progress, output_dir=output, **options)
             result["speakers"].update(names_snapshot)
-            save_speakers(result, output)
-            export(result, output)
+            save_speakers_with_aliases(result, output)
             if edit_enabled:
                 save_readable(enhance(result, status=progress), output)
+
         submit(job)
+
     def check():
         nonlocal output
-        selected = filedialog.askopenfilename(title="Select 03_readable.json for a separate comparison",
-                                             filetypes=[("JSON transcript", "*.json")])
+        selected = filedialog.askopenfilename(
+            title="Select 03_readable.json for a separate comparison",
+            filetypes=[("JSON transcript", "*.json")],
+        )
         if not selected:
             return
-        output = Path(selected).parent / datetime.now().strftime("review_%Y-%m-%d_%H-%M-%S-%f")
+        output = Path(selected).parent / datetime.now().strftime(
+            "review_%Y-%m-%d_%H-%M-%S-%f"
+        )
+
         def job():
             edited = json.loads(Path(selected).read_text(encoding="utf-8"))
             save_readable(review(edited, status=progress), output)
+
         submit(job)
-    for label, action in (("Process and save stages …", start),
-                          ("Compare readable draft …", check),
-                          ("Download / prepare Ministral", lambda: submit(lambda: OllamaClient().prepare(progress)))):
+
+    for label, action in (
+        ("Process and save stages …", start),
+        ("Compare readable draft …", check),
+        (
+            "Download / prepare Ministral",
+            lambda: submit(lambda: OllamaClient().prepare(progress)),
+        ),
+    ):
         button = ttk.Button(buttons, text=label, command=action)
-        button.pack(side="left", padx=(0,8))
+        button.pack(side="left", padx=(0, 8))
         controls.append(button)
+
     def poll():
         nonlocal running
         for _ in range(100):
@@ -143,13 +197,22 @@ def launch():
                     status.set("Processing failed. Completed stages remain saved.")
                     messagebox.showerror("Processing failed", payload)
                 else:
-                    status.set(f"Done. Saved stages: {output}" if output else "Local model prepared.")
-        root.after(150,poll)
+                    status.set(
+                        f"Done. Saved stages: {output}"
+                        if output
+                        else "Local model prepared."
+                    )
+        root.after(150, poll)
+
     def close():
         if running:
-            messagebox.showinfo("Processing in progress", "Wait for completion or press Ctrl+C in the terminal to cancel.")
+            messagebox.showinfo(
+                "Processing in progress",
+                "Wait for completion or press Ctrl+C in the terminal to cancel.",
+            )
             return
         root.destroy()
-    root.protocol("WM_DELETE_WINDOW",close)
+
+    root.protocol("WM_DELETE_WINDOW", close)
     poll()
     root.mainloop()

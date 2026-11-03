@@ -1,21 +1,40 @@
-"""Resolve an optional complete local diarization model without Hub access."""
+"""Resolve where speech models come from: a local folder or the Hugging Face Hub."""
+
 import os
 from pathlib import Path
 
 DIARIZATION_ID = "pyannote/speaker-diarization-community-1"
+WHISPER_MODEL = "large-v3"
 
 
-def local_diarization_model():
+def local_diarization_model() -> Path | None:
+    """The complete local community-1 folder, or None when the Hub is used.
+
+    Raises:
+        ValueError: INTERVIEW_DIARIZATION_MODEL names an incomplete folder.
+    """
     configured = os.environ.get("INTERVIEW_DIARIZATION_MODEL")
-    candidate = (Path(configured).expanduser() if configured else
-                 Path(__file__).resolve().parent.parent / "models" / "community-1")
+    candidate = (
+        Path(configured).expanduser()
+        if configured
+        else Path(__file__).resolve().parent.parent / "models" / "community-1"
+    )
     if candidate.is_dir() and (candidate / "config.yaml").is_file():
         return candidate.resolve()
     if configured:
-        raise ValueError("INTERVIEW_DIARIZATION_MODEL must point to a complete community-1 folder with config.yaml.")
+        raise ValueError(
+            "INTERVIEW_DIARIZATION_MODEL must point to a complete community-1 "
+            "folder with config.yaml."
+        )
     return None
 
 
-def diarization_checkpoint():
+def diarization_checkpoint() -> str:
+    """The local community-1 folder if present, otherwise its Hub ID."""
     local = local_diarization_model()
     return str(local) if local else DIARIZATION_ID
+
+
+def hub_offline() -> bool:
+    """Whether the run was started with --offline (no Hub downloads)."""
+    return os.environ.get("HF_HUB_OFFLINE") == "1"
