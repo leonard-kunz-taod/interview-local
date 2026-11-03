@@ -86,13 +86,16 @@ def launch():
     def progress(message):
         events.put(("status", message))
 
+    def set_controls(state):
+        for button in controls:
+            button.config(state=state)
+
     def submit(function):
         nonlocal running
         if running:
             return
         running = True
-        for button in controls:
-            button.config(state="disabled")
+        set_controls("disabled")
 
         def job():
             try:
@@ -124,18 +127,10 @@ def launch():
         if not base:
             return
         output = Path(base) / datetime.now().strftime("interview_%Y-%m-%d_%H-%M-%S-%f")
-        options = {
-            "token": token.get().strip() or None,
-            "offline": offline.get(),
-            "alignment": alignment.get(),
-        }
-        names_snapshot = {
-            "A": name_a.get().strip() or "Speaker A",
-            "B": name_b.get().strip() or "Speaker B",
-        }
+        options = speech_options()
+        names_snapshot = entered_names()
         edit_enabled = use_llm.get()
-        for view in views.values():
-            view.delete("1.0", "end")
+        clear_views()
 
         def job():
             if edit_enabled:
@@ -147,6 +142,23 @@ def launch():
                 save_readable(enhance(result, status=progress), output)
 
         submit(job)
+
+    def speech_options():
+        return {
+            "token": token.get().strip() or None,
+            "offline": offline.get(),
+            "alignment": alignment.get(),
+        }
+
+    def entered_names():
+        return {
+            "A": name_a.get().strip() or "Speaker A",
+            "B": name_b.get().strip() or "Speaker B",
+        }
+
+    def clear_views():
+        for view in views.values():
+            view.delete("1.0", "end")
 
     def check():
         nonlocal output
@@ -179,7 +191,6 @@ def launch():
         controls.append(button)
 
     def poll():
-        nonlocal running
         for _ in range(100):
             try:
                 kind, payload = events.get_nowait()
@@ -188,21 +199,22 @@ def launch():
             if kind == "status":
                 status.set(payload[-500:])
             else:
-                running = False
-                token.set("")
-                for button in controls:
-                    button.config(state="normal")
-                refresh_views()
-                if kind == "error":
-                    status.set("Processing failed. Completed stages remain saved.")
-                    messagebox.showerror("Processing failed", payload)
-                else:
-                    status.set(
-                        f"Done. Saved stages: {output}"
-                        if output
-                        else "Local model prepared."
-                    )
+                finish_job(kind, payload)
         root.after(150, poll)
+
+    def finish_job(kind, payload):
+        nonlocal running
+        running = False
+        token.set("")
+        set_controls("normal")
+        refresh_views()
+        if kind == "error":
+            status.set("Processing failed. Completed stages remain saved.")
+            messagebox.showerror("Processing failed", payload)
+        else:
+            status.set(
+                f"Done. Saved stages: {output}" if output else "Local model prepared."
+            )
 
     def close():
         if running:

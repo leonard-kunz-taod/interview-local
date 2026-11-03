@@ -98,12 +98,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
-    if args.audio and (args.rename or args.enhance or args.review):
-        raise ValueError("Supply audio or a saved-stage command, not both.")
-    if args.offline and (args.prepare or args.prepare_llm):
-        raise ValueError(
-            "Preparation downloads models; do not combine it with --offline."
-        )
+    _reject_audio_with_saved_stage(args)
+    _reject_offline_preparation(args)
     if args.doctor:
         _doctor()
         return 0
@@ -115,20 +111,59 @@ def _run(args: argparse.Namespace) -> int:
             return 0
         except ImportError:
             print("Tk is not installed. Falling back to the terminal dialog.")
-    if args.prepare or args.prepare_llm:
+    return _run_terminal_mode(args)
+
+
+def _reject_audio_with_saved_stage(args: argparse.Namespace) -> None:
+    if args.audio and _saved_stage_requested(args):
+        raise ValueError("Supply audio or a saved-stage command, not both.")
+
+
+def _reject_offline_preparation(args: argparse.Namespace) -> None:
+    if args.offline and _preparation_requested(args):
+        raise ValueError(
+            "Preparation downloads models; do not combine it with --offline."
+        )
+
+
+def _saved_stage_requested(args: argparse.Namespace) -> bool:
+    return bool(args.rename or args.enhance or args.review)
+
+
+def _preparation_requested(args: argparse.Namespace) -> bool:
+    return args.prepare or args.prepare_llm
+
+
+def _run_terminal_mode(args: argparse.Namespace) -> int:
+    if _preparation_requested(args):
         return _prepare(args.prepare, args.prepare_llm, args.alignment)
+    if _saved_stage_requested(args):
+        return _run_saved_stage(args)
+    return _process_audio(args)
+
+
+def _run_saved_stage(args: argparse.Namespace) -> int:
     if args.review:
         return _review_saved(args.review, args.output)
     if args.enhance:
         return _enhance_saved(args.enhance, args.output)
-    if args.rename:
-        return _rename_saved(args.rename, args.output, args.name_a, args.name_b)
-    return _process_audio(args)
+    return _rename_saved(args.rename, args.output, args.name_a, args.name_b)
 
 
 def _doctor() -> None:
     print(f"System: {platform.system()} {platform.release()} / {platform.machine()}")
     print(f"Python: {platform.python_version()}")
+    _print_ram()
+    _print_accelerators()
+    print("Speech models: CPU INT8/Float32, sequential worker processes.")
+    print(
+        "Readability: local Ollama / Ministral 3 8B, 8192-token context, "
+        "after speech models exit."
+    )
+    _print_local_llm()
+
+
+def _print_ram() -> None:
     try:
         import psutil
 
@@ -139,6 +174,9 @@ def _doctor() -> None:
         )
     except (ImportError, OSError):
         print("Could not read RAM information automatically.")
+
+
+def _print_accelerators() -> None:
     import torch
 
     print(f"Apple Metal/MPS available: {torch.backends.mps.is_available()}")
@@ -150,11 +188,9 @@ def _doctor() -> None:
         print(
             "Apple Silicon: CPU and GPU share RAM; there is no additional dedicated VRAM."
         )
-    print("Speech models: CPU INT8/Float32, sequential worker processes.")
-    print(
-        "Readability: local Ollama / Ministral 3 8B, 8192-token context, "
-        "after speech models exit."
-    )
+
+
+def _print_local_llm() -> None:
     try:
         print("Local LLM:", llm.OllamaClient().ready())
     except RuntimeError as exc:
@@ -203,29 +239,14 @@ def _rename_saved(
 
 
 def _process_audio(args: argparse.Namespace) -> int:
-    interactive = not args.audio
-    audio = (args.audio or _ask_audio_path()).expanduser()
-    if not audio.is_file():
-        raise ValueError("Audio file not found. Enter its full path.")
+    audio = _audio_path(args)
     if args.raw_only:
         return _transcribe_raw(audio, args.offline, args.output)
     if not args.no_llm:
         llm.OllamaClient().ready()
     output = _create_output(args.output)
-    token = None if args.offline else _get_token()
-    result = pipeline.process(
-        audio,
-        token=token,
-        offline=args.offline,
-        alignment=args.alignment,
-        output_dir=output,
-    )
-    names = (
-        _ask_speaker_names(args.name_a, args.name_b)
-        if interactive
-        else {"A": args.name_a, "B": args.name_b}
-    )
-    _save_named_speakers(result, names, output)
+    result = _speaker_transcript(audio, args, output)
+    _save_named_speakers(result, _speaker_names(args), output)
     if args.no_llm:
         print(render(result))
     else:
@@ -233,6 +254,33 @@ def _process_audio(args: argparse.Namespace) -> int:
         print("For the separate comparison pass, run --review on 03_readable.json.")
     print(f"Completed stages saved to {output}")
     return 0
+
+
+def _audio_path(args: argparse.Namespace) -> Path:
+    """The audio file from the command line, or asked for on the terminal."""
+    audio = (args.audio or _ask_audio_path()).expanduser()
+    if not audio.is_file():
+        raise ValueError("Audio file not found. Enter its full path.")
+    return audio
+
+
+def _speaker_transcript(audio: Path, args: argparse.Namespace, output: Path) -> dict:
+    """Run the speech stages; offline runs never ask for a Hub token."""
+    token = None if args.offline else _get_token()
+    return pipeline.process(
+        audio,
+        token=token,
+        offline=args.offline,
+        alignment=args.alignment,
+        output_dir=output,
+    )
+
+
+def _speaker_names(args: argparse.Namespace) -> dict:
+    """Names from the command line; asked for when the audio path was too."""
+    if args.audio:
+        return {"A": args.name_a, "B": args.name_b}
+    return _ask_speaker_names(args.name_a, args.name_b)
 
 
 def _transcribe_raw(audio: Path, offline: bool, output_path: Path | None) -> int:
@@ -259,6 +307,11 @@ def _get_token() -> str | None:
     token = cached_token()
     if token:
         return token
+    return _ask_token()
+
+
+def _ask_token() -> str | None:
+    """A token entered for this run only; None when the entry is skipped."""
     print("Accept the pyannote/speaker-diarization-community-1 conditions:")
     print("https://huggingface.co/pyannote/speaker-diarization-community-1")
     print("Create a read token: https://huggingface.co/settings/tokens")

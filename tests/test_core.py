@@ -55,6 +55,15 @@ class SpeakerAssignmentTests(unittest.TestCase):
     def test_empty_input_produces_no_segments(self):
         self.assertEqual(merge([], [])["segments"], [])
 
+    def test_speaker_heard_only_in_overlap_gets_the_next_letter(self):
+        result = merge([], [Turn(0, 1, "x")], [Turn(0, 1, "x"), Turn(0.5, 2, "y")])
+        self.assertEqual(result["speakers"], {"A": "Speaker A", "B": "Speaker B"})
+
+    def test_reliable_word_inside_one_turn_is_certain(self):
+        result = merge([Word(0.2, 0.6, "Guten")], GREETING_TURNS)
+        word = result["words"][0]
+        self.assertEqual((word["uncertain"], word["uncertainty_reasons"]), (False, []))
+
 
 class SegmentTests(unittest.TestCase):
     def test_consecutive_words_of_one_speaker_form_one_segment(self):
@@ -72,6 +81,19 @@ class SegmentTests(unittest.TestCase):
         result = merge(words, [Turn(0, 40, "x")])
         sizes = [len(s["word_ids"]) for s in result["segments"]]
         self.assertEqual(sizes, [35, 2])
+
+    def test_word_without_text_is_left_out_of_segments(self):
+        words = [Word(0, 0.5, "eins"), Word(0.5, 0.6, " "), Word(0.6, 1, "zwei")]
+        result = merge(words, [Turn(0, 2, "x")])
+        self.assertEqual(
+            [(s["text"], s["word_ids"]) for s in result["segments"]],
+            [("eins zwei", [0, 2])],
+        )
+
+    def test_segment_is_flagged_if_any_of_its_words_is(self):
+        words = [Word(0, 0.5, "eins"), Word(0.5, 1, "zwei", "estimated")]
+        segment = merge(words, [Turn(0, 2, "x")])["segments"][0]
+        self.assertEqual((segment["uncertain"], segment["overlap"]), (True, False))
 
 
 class OverlapTests(unittest.TestCase):
@@ -103,6 +125,27 @@ class OverlapTests(unittest.TestCase):
         turns = [Turn(0, 2, "x"), Turn(2, 3, "y")]
         self.assertEqual(overlap_regions(turns, {"x": "A", "y": "B"}), [])
 
+    def test_overlap_of_the_same_speakers_across_turn_changes_is_one_region(self):
+        turns = [Turn(0, 3, "x"), Turn(1, 2, "y"), Turn(1.5, 3, "y")]
+        self.assertEqual(
+            overlap_regions(turns, {"x": "A", "y": "B"}),
+            [{"start": 1, "end": 3, "speakers": ["A", "B"]}],
+        )
+
+    def test_separate_overlaps_form_separate_regions(self):
+        turns = [Turn(0, 4, "x"), Turn(1, 2, "y"), Turn(3, 4, "y")]
+        self.assertEqual(
+            overlap_regions(turns, {"x": "A", "y": "B"}),
+            [
+                {"start": 1, "end": 2, "speakers": ["A", "B"]},
+                {"start": 3, "end": 4, "speakers": ["A", "B"]},
+            ],
+        )
+
+    def test_zero_length_turn_is_ignored(self):
+        turns = [Turn(0, 2, "x"), Turn(1, 1, "y")]
+        self.assertEqual(overlap_regions(turns, {"x": "A", "y": "B"}), [])
+
     def test_missing_regular_turns_mark_overlap_detection_unavailable(self):
         self.assertFalse(merge([], [])["overlap_detection_available"])
 
@@ -127,6 +170,25 @@ class RenderTests(unittest.TestCase):
             text,
             "[00:00:00.000 – 00:00:01.500] Änne "
             "[Review assignment; Overlapping speech]\nGrüße\n",
+        )
+
+    def test_overlap_alone_is_the_only_flag_shown(self):
+        segment = {"start": 0, "end": 1, "text": "Ja", "speaker": "A", "overlap": True}
+        text = render({"speakers": {"A": "Änne"}, "segments": [segment]})
+        self.assertEqual(
+            text, "[00:00:00.000 – 00:00:01.000] Änne [Overlapping speech]\nJa\n"
+        )
+
+    def test_segments_are_separated_by_a_blank_line(self):
+        segments = [
+            {"start": 0, "end": 1, "text": "Ja", "speaker": "A"},
+            {"start": 1, "end": 2, "text": "Nein", "speaker": "A"},
+        ]
+        text = render({"speakers": {"A": "Änne"}, "segments": segments})
+        self.assertEqual(
+            text,
+            "[00:00:00.000 – 00:00:01.000] Änne\nJa\n\n"
+            "[00:00:01.000 – 00:00:02.000] Änne\nNein\n",
         )
 
     def test_segment_without_speaker_is_unassigned(self):

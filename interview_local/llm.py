@@ -115,22 +115,15 @@ JOINED_FLAGS = ("uncertain", "overlap", "content_changed", "speaker_changed")
 MAX_STORED_MESSAGE_CHARS = 1000
 MAX_FEEDBACK_CHARS = 500
 MAX_REVIEW_REASONS = 10
+REORDERED_WORDS = "The editor skipped, duplicated or reordered source words."
+INVALID_REVIEW = "Invalid reviewer response."
 
 
 class OllamaClient:
     """The local Ollama service; non-loopback endpoints and redirects are refused."""
 
     def __init__(self, base_url=LOCAL_ENDPOINT):
-        parsed = urllib.parse.urlsplit(base_url)
-        if (
-            parsed.scheme != "http"
-            or parsed.hostname not in LOOPBACK_HOSTS
-            or parsed.username
-            or parsed.password
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-        ):
+        if not _is_loopback_http_root(base_url):
             raise ValueError(
                 "The model endpoint must be a local loopback HTTP address."
             )
@@ -163,17 +156,9 @@ class OllamaClient:
             RuntimeError: The model is missing or backed by a cloud service.
         """
         models = self.request("/api/tags", timeout=10).get("models", [])
-        entry = next((m for m in models if m.get("name") == MODEL), None)
-        if entry is None:
-            raise RuntimeError(
-                f"{MODEL} is not installed locally. Run interview-local --prepare-llm "
-                "once with internet access. No Hugging Face login is needed."
-            )
+        entry = _installed_model(models)
         details = self.request("/api/show", {"model": MODEL}, timeout=30)
-        if details.get("remote_host") or details.get("remote_model"):
-            raise RuntimeError(
-                "Cloud-backed models are not permitted for transcript processing."
-            )
+        _reject_cloud_backed(details)
         return {
             "model": MODEL,
             "digest": entry.get("digest"),
@@ -245,24 +230,8 @@ def enhance(source: dict, client: OllamaClient | None = None, status=print) -> d
     words = _source_words(source)
     client = client or OllamaClient()
     identity = client.ready()
-    paragraphs = []
-    rejected = 0
     try:
-        for offset in range(0, len(words), EDIT_CHUNK_WORDS):
-            chunk = words[offset : offset + EDIT_CHUNK_WORDS]
-            status(
-                f"LLM readability: words {offset + 1}–{offset + len(chunk)} "
-                f"/ {len(words)}"
-            )
-            data = _edit_request(source["speakers"], words, offset)
-            accepted, rejection = _edit_chunk(client, data, chunk)
-            if rejection is not None:
-                rejected += 1
-                status(
-                    f"Editor response rejected twice ({rejection}); "
-                    "original text retained and flagged."
-                )
-            paragraphs.extend(accepted)
+        paragraphs, rejected = _edited_chunks(client, source["speakers"], words, status)
     finally:
         client.unload()
     paragraphs = _join_paragraphs(paragraphs)
@@ -325,6 +294,36 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise RuntimeError("Refusing an HTTP redirect from the local model service.")
 
 
+def _is_loopback_http_root(url: str) -> bool:
+    """Plain HTTP to a loopback host without credentials, path, query or fragment."""
+    parsed = urllib.parse.urlsplit(url)
+    extras = (parsed.username, parsed.password, parsed.query, parsed.fragment)
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in LOOPBACK_HOSTS
+        and parsed.path in {"", "/"}
+        and not any(extras)
+    )
+
+
+def _installed_model(models: list[dict]) -> dict:
+    """The tag entry of the editor model among the locally installed models."""
+    for entry in models:
+        if entry.get("name") == MODEL:
+            return entry
+    raise RuntimeError(
+        f"{MODEL} is not installed locally. Run interview-local --prepare-llm "
+        "once with internet access. No Hugging Face login is needed."
+    )
+
+
+def _reject_cloud_backed(details: dict) -> None:
+    if details.get("remote_host") or details.get("remote_model"):
+        raise RuntimeError(
+            "Cloud-backed models are not permitted for transcript processing."
+        )
+
+
 def _report_pull_progress(lines, status) -> None:
     last = None
     for line in lines:
@@ -358,13 +357,33 @@ def _tokens(text: str) -> list[str]:
 def _source_words(source: dict) -> list[dict]:
     words = deepcopy(source.get("words", []))
     for i, w in enumerate(words):
-        if "word_id" not in w:
-            w["word_id"] = i
+        w.setdefault("word_id", i)
     if [w["word_id"] for w in words] != list(range(len(words))):
         raise ValueError(
             "Source word IDs must be unique, ordered and consecutive from zero."
         )
     return words
+
+
+def _edited_chunks(client, speakers: dict, words: list[dict], status):
+    """Edited paragraphs of every chunk, and how many chunks were rejected."""
+    paragraphs = []
+    rejected = 0
+    for offset in range(0, len(words), EDIT_CHUNK_WORDS):
+        chunk = words[offset : offset + EDIT_CHUNK_WORDS]
+        status(
+            f"LLM readability: words {offset + 1}–{offset + len(chunk)} / {len(words)}"
+        )
+        data = _edit_request(speakers, words, offset)
+        accepted, rejection = _edit_chunk(client, data, chunk)
+        if rejection is not None:
+            rejected += 1
+            status(
+                f"Editor response rejected twice ({rejection}); "
+                "original text retained and flagged."
+            )
+        paragraphs.extend(accepted)
+    return paragraphs, rejected
 
 
 def _compact(word: dict) -> dict:
@@ -425,82 +444,122 @@ def _edit_schema(speakers: dict) -> dict:
 
 
 def _validate_edit(response: dict, words: list[dict], speakers) -> list[dict]:
-    """Accept edited paragraphs only if they cover every word once, in order."""
-    proposed = response.get("paragraphs")
-    if not isinstance(proposed, list) or not proposed:
-        raise ValueError("No edited paragraphs returned.")
-    cursor = words[0]["word_id"]
-    last_id = words[-1]["word_id"]
-    by_id = {w["word_id"]: w for w in words}
+    """Accept edited paragraphs only if they cover every word once, in order.
+
+    The words are one chunk of consecutive source word IDs.
+    """
     output = []
-    for paragraph in proposed:
-        first, last = paragraph.get("first_word"), paragraph.get("last_word")
-        if (
-            type(first) is not int
-            or type(last) is not int
-            or first != cursor
-            or last < first
-            or last > last_id
-        ):
-            raise ValueError(
-                "The editor skipped, duplicated or reordered source words."
-            )
+    next_id = words[0]["word_id"]
+    for paragraph in _proposed_paragraphs(response):
+        selected = _claimed_words(paragraph, words, next_id)
         _check_paragraph_content(paragraph, speakers)
-        selected = [by_id[i] for i in range(first, last + 1)]
         output.append(_accepted_paragraph(paragraph, selected))
-        cursor = last + 1
-    if cursor != last_id + 1:
+        next_id = selected[-1]["word_id"] + 1
+    if next_id != words[-1]["word_id"] + 1:
         raise ValueError("The editor omitted words at the end of the chunk.")
     return output
 
 
+def _proposed_paragraphs(response: dict) -> list:
+    proposed = response.get("paragraphs")
+    if not isinstance(proposed, list) or not proposed:
+        raise ValueError("No edited paragraphs returned.")
+    return proposed
+
+
+def _claimed_words(paragraph: dict, words: list[dict], next_id: int) -> list[dict]:
+    """The chunk words a paragraph claims; it must continue exactly at next_id."""
+    first, last = _word_range(paragraph)
+    if first != next_id or not first <= last <= words[-1]["word_id"]:
+        raise ValueError(REORDERED_WORDS)
+    chunk_start = words[0]["word_id"]
+    return words[first - chunk_start : last - chunk_start + 1]
+
+
+def _word_range(paragraph: dict) -> tuple[int, int]:
+    first, last = paragraph.get("first_word"), paragraph.get("last_word")
+    if type(first) is not int or type(last) is not int:
+        raise ValueError(REORDERED_WORDS)
+    return first, last
+
+
 def _check_paragraph_content(paragraph: dict, speakers) -> None:
-    speaker, text = paragraph.get("speaker"), paragraph.get("text")
+    speaker = paragraph.get("speaker")
     if speaker is not None and speaker not in speakers:
         raise ValueError("The editor introduced an unknown speaker.")
+    _check_text_and_uncertainty(paragraph)
+    if not isinstance(paragraph.get("reason"), str):
+        raise TypeError("Missing editorial reason.")
+
+
+def _check_text_and_uncertainty(paragraph: dict) -> None:
+    text = paragraph.get("text")
     if (
         not isinstance(text, str)
         or not text.strip()
         or type(paragraph.get("uncertain")) is not bool
     ):
         raise ValueError("The editor returned invalid text or uncertainty metadata.")
-    if not isinstance(paragraph.get("reason"), str):
-        raise TypeError("Missing editorial reason.")
 
 
 def _accepted_paragraph(paragraph: dict, selected: list[dict]) -> dict:
     speaker, text = paragraph.get("speaker"), paragraph["text"]
-    original = " ".join(w["text"] for w in selected)
-    if _similarity(original, text) < MIN_WORDING_SIMILARITY:
+    source = _source_span(selected)
+    if _similarity(source["source_text"], text) < MIN_WORDING_SIMILARITY:
         raise ValueError(
             "The editor changed too much source wording; retaining original text."
         )
-    content_changed = _wording_changed(original, text)
+    content_changed = _wording_changed(source["source_text"], text)
     speaker_changed = _speaker_changed(selected, speaker)
-    reasons = sorted({r for w in selected for r in w.get("uncertainty_reasons", [])})
+    reasons = _source_reasons(selected)
     if content_changed:
         reasons.append("wording_changed_by_llm")
     if speaker_changed:
         reasons.append("speaker_changed_by_llm")
+    flags = (
+        paragraph["uncertain"],
+        content_changed,
+        speaker_changed,
+        _source_flagged(selected),
+    )
     return {
-        "start": min(w["start"] for w in selected),
-        "end": max(w["end"] for w in selected),
+        "start": source["start"],
+        "end": source["end"],
         "speaker": speaker,
         "text": text.strip(),
-        "source_word_ids": [w["word_id"] for w in selected],
-        "source_text": original,
-        "uncertain": bool(
-            paragraph["uncertain"]
-            or content_changed
-            or speaker_changed
-            or _source_flagged(selected)
-        ),
+        "source_word_ids": source["source_word_ids"],
+        "source_text": source["source_text"],
+        "uncertain": any(flags),
         "uncertainty_reasons": reasons,
-        "overlap": any(w.get("overlap", False) for w in selected),
+        "overlap": source["overlap"],
         "editor_reason": paragraph["reason"][:MAX_STORED_MESSAGE_CHARS],
         "content_changed": content_changed,
         "speaker_changed": speaker_changed,
     }
+
+
+def _source_span(words: list[dict]) -> dict:
+    """Time bounds, IDs, wording and overlap of the source words of a paragraph."""
+    start, end = _time_bounds(words)
+    return {
+        "start": start,
+        "end": end,
+        "source_word_ids": [w["word_id"] for w in words],
+        "source_text": _joined_text(words),
+        "overlap": any(w.get("overlap", False) for w in words),
+    }
+
+
+def _time_bounds(words: list[dict]) -> tuple[float, float]:
+    return min(w["start"] for w in words), max(w["end"] for w in words)
+
+
+def _joined_text(words: list[dict]) -> str:
+    return " ".join(w["text"] for w in words)
+
+
+def _source_reasons(words: list[dict]) -> list[str]:
+    return sorted({r for w in words for r in w.get("uncertainty_reasons", [])})
 
 
 def _similarity(original: str, edited: str) -> float:
@@ -525,25 +584,7 @@ def _source_flagged(words: list[dict]) -> bool:
 
 def _fallback_paragraphs(words: list[dict], reason: Exception) -> list[dict]:
     """Original wording per speaker run, flagged as a rejected edit."""
-    groups = []
-    for w in words:
-        if groups and groups[-1][-1].get("speaker") == w.get("speaker"):
-            groups[-1].append(w)
-        else:
-            groups.append([w])
-    response = {
-        "paragraphs": [
-            {
-                "first_word": g[0]["word_id"],
-                "last_word": g[-1]["word_id"],
-                "speaker": g[0].get("speaker"),
-                "text": " ".join(w["text"] for w in g) or "…",
-                "uncertain": True,
-                "reason": "Editor response rejected; original wording retained.",
-            }
-            for g in groups
-        ]
-    }
+    response = {"paragraphs": [_original_wording(run) for run in _speaker_runs(words)]}
     result = _validate_edit(response, words, {w.get("speaker") for w in words})
     for p in result:
         p["uncertainty_reasons"].append("editor_output_rejected")
@@ -551,23 +592,35 @@ def _fallback_paragraphs(words: list[dict], reason: Exception) -> list[dict]:
     return result
 
 
+def _speaker_runs(words: list[dict]) -> list[list[dict]]:
+    """Consecutive words grouped while the speaker stays the same."""
+    runs = []
+    for w in words:
+        if runs and runs[-1][-1].get("speaker") == w.get("speaker"):
+            runs[-1].append(w)
+        else:
+            runs.append([w])
+    return runs
+
+
+def _original_wording(run: list[dict]) -> dict:
+    """An editor-shaped paragraph that keeps a speaker run's source wording."""
+    return {
+        "first_word": run[0]["word_id"],
+        "last_word": run[-1]["word_id"],
+        "speaker": run[0].get("speaker"),
+        "text": _joined_text(run) or "…",
+        "uncertain": True,
+        "reason": "Editor response rejected; original wording retained.",
+    }
+
+
 def _join_paragraphs(paragraphs: list[dict]) -> list[dict]:
     """Join nearby paragraphs of one speaker into readable blocks."""
     joined = []
     for paragraph in paragraphs:
         if joined and _joinable(joined[-1], paragraph):
-            previous = joined[-1]
-            previous["text"] += " " + paragraph["text"]
-            previous["source_text"] += " " + paragraph["source_text"]
-            previous["source_word_ids"].extend(paragraph["source_word_ids"])
-            previous["end"] = max(previous["end"], paragraph["end"])
-            for flag in JOINED_FLAGS:
-                previous[flag] |= paragraph[flag]
-            previous["uncertainty_reasons"] = sorted(
-                set(previous["uncertainty_reasons"] + paragraph["uncertainty_reasons"])
-            )
-            if paragraph.get("editor_error"):
-                previous["editor_error"] = paragraph["editor_error"]
+            _append_paragraph(joined[-1], paragraph)
         else:
             joined.append(paragraph)
     return joined
@@ -576,18 +629,52 @@ def _join_paragraphs(paragraphs: list[dict]) -> list[dict]:
 def _joinable(previous: dict, paragraph: dict) -> bool:
     word_count = len(previous["source_word_ids"]) + len(paragraph["source_word_ids"])
     return (
-        paragraph["speaker"] is not None
-        and previous["speaker"] == paragraph["speaker"]
-        and paragraph["start"] - previous["end"] < JOIN_PAUSE_SECONDS
-        and paragraph["end"] - previous["start"] < JOIN_SPAN_SECONDS
+        _same_known_speaker(previous, paragraph)
+        and _close_in_time(previous, paragraph)
         and word_count <= MAX_PARAGRAPH_WORDS
     )
+
+
+def _same_known_speaker(previous: dict, paragraph: dict) -> bool:
+    return (
+        paragraph["speaker"] is not None and previous["speaker"] == paragraph["speaker"]
+    )
+
+
+def _close_in_time(previous: dict, paragraph: dict) -> bool:
+    return (
+        paragraph["start"] - previous["end"] < JOIN_PAUSE_SECONDS
+        and paragraph["end"] - previous["start"] < JOIN_SPAN_SECONDS
+    )
+
+
+def _append_paragraph(previous: dict, paragraph: dict) -> None:
+    """Extend previous with the wording, source words and flags of paragraph."""
+    previous["text"] += " " + paragraph["text"]
+    previous["source_text"] += " " + paragraph["source_text"]
+    previous["source_word_ids"].extend(paragraph["source_word_ids"])
+    previous["end"] = max(previous["end"], paragraph["end"])
+    for flag in JOINED_FLAGS:
+        previous[flag] |= paragraph[flag]
+    previous["uncertainty_reasons"] = sorted(
+        set(previous["uncertainty_reasons"] + paragraph["uncertainty_reasons"])
+    )
+    if paragraph.get("editor_error"):
+        previous["editor_error"] = paragraph["editor_error"]
 
 
 def _verified_source_words(edited: dict) -> list[dict]:
     """Source words of a readable draft whose provenance and coverage still hold."""
     if edited.get("stage") != "readable":
         raise ValueError("Review requires a stage-3 readable JSON artifact.")
+    words = _source_words(_embedded_source(edited))
+    # Validate the complete reference coverage before asking the model to audit it.
+    _check_exact_coverage(edited["paragraphs"], len(words))
+    return words
+
+
+def _embedded_source(edited: dict) -> dict:
+    """The source transcript embedded in a draft, if its fingerprint still matches."""
     source = edited.get("source_transcript")
     if not isinstance(source, dict) or _fingerprint(source) != edited.get(
         "source_sha256"
@@ -595,19 +682,20 @@ def _verified_source_words(edited: dict) -> list[dict]:
         raise ValueError(
             "The embedded source transcript is missing or its fingerprint changed."
         )
-    words = _source_words(source)
-    # Validate the complete reference coverage before asking the model to audit it.
-    coverage = [i for p in edited["paragraphs"] for i in p["source_word_ids"]]
-    if coverage != list(range(len(words))):
+    return source
+
+
+def _check_exact_coverage(paragraphs: list[dict], word_count: int) -> None:
+    coverage = [i for p in paragraphs for i in p["source_word_ids"]]
+    if coverage != list(range(word_count)):
         raise ValueError(
             "Readable paragraphs do not cover the source exactly once in order."
         )
-    return words
 
 
 def _paragraph_source(paragraph: dict, words: list[dict]) -> list[dict]:
     selected = [words[i] for i in paragraph["source_word_ids"]]
-    if paragraph.get("source_text") != " ".join(w["text"] for w in selected):
+    if paragraph.get("source_text") != _joined_text(selected):
         raise ValueError(
             "A paragraph's stored source text no longer matches its word IDs."
         )
@@ -616,12 +704,47 @@ def _paragraph_source(paragraph: dict, words: list[dict]) -> list[dict]:
 
 def _apply_review(client, paragraph: dict, selected: list[dict]) -> None:
     """Record the reviewer verdict, then re-derive the flags it must not clear."""
-    source_text = paragraph["source_text"]
-    data = {
+    paragraph.update(_review_verdict(client, paragraph, selected))
+    # The same model agreeing with its edit must never erase source flags.
+    paragraph["content_changed"] = _wording_changed(
+        paragraph["source_text"], paragraph["text"]
+    )
+    paragraph["speaker_changed"] = _speaker_changed(selected, paragraph["speaker"])
+    flags = (
+        paragraph["uncertain"],
+        paragraph["review_uncertain"],
+        paragraph["content_changed"],
+        paragraph["speaker_changed"],
+        _source_flagged(selected),
+    )
+    paragraph["uncertain"] = any(flags)
+
+
+def _review_verdict(client, paragraph: dict, selected: list[dict]) -> dict:
+    """The reviewer's verdict fields; an invalid response requires manual review."""
+    data = _review_request(paragraph, selected)
+    try:
+        response = client.chat(REVIEW_PROMPT, data, REVIEW_SCHEMA)
+        verdict = _validated_review(response, paragraph["paragraph_id"])
+    except (ValueError, KeyError, TypeError):
+        return {
+            "review_uncertain": True,
+            "review_reasons": ["Invalid model review; manual review required."],
+            "review_status": "invalid_response",
+        }
+    return {
+        "review_uncertain": verdict["uncertain"],
+        "review_reasons": verdict["reasons"][:MAX_REVIEW_REASONS],
+        "review_status": "compared",
+    }
+
+
+def _review_request(paragraph: dict, selected: list[dict]) -> dict:
+    return {
         "paragraphs": [
             {
                 "paragraph_id": paragraph["paragraph_id"],
-                "source_text": source_text,
+                "source_text": paragraph["source_text"],
                 "source_words": [_compact(w) for w in selected],
                 "edited_text": paragraph["text"],
                 "edited_speaker": paragraph["speaker"],
@@ -629,38 +752,25 @@ def _apply_review(client, paragraph: dict, selected: list[dict]) -> None:
             }
         ]
     }
-    try:
-        response = client.chat(REVIEW_PROMPT, data, REVIEW_SCHEMA)
-        verdict = _validated_review(response, paragraph["paragraph_id"])
-        paragraph["review_uncertain"] = verdict["uncertain"]
-        paragraph["review_reasons"] = verdict["reasons"][:MAX_REVIEW_REASONS]
-        paragraph["review_status"] = "compared"
-    except (ValueError, KeyError, TypeError):
-        paragraph["review_uncertain"] = True
-        paragraph["review_reasons"] = ["Invalid model review; manual review required."]
-        paragraph["review_status"] = "invalid_response"
-    # The same model agreeing with its edit must never erase source flags.
-    paragraph["content_changed"] = _wording_changed(source_text, paragraph["text"])
-    paragraph["speaker_changed"] = _speaker_changed(selected, paragraph["speaker"])
-    paragraph["uncertain"] = bool(
-        paragraph["uncertain"]
-        or paragraph["review_uncertain"]
-        or paragraph["content_changed"]
-        or paragraph["speaker_changed"]
-        or _source_flagged(selected)
-    )
 
 
 def _validated_review(response: dict, paragraph_id: int) -> dict:
     items = response["reviews"]
-    if (
-        not isinstance(items, list)
-        or len(items) != 1
-        or type(items[0].get("paragraph_id")) is not int
-        or items[0]["paragraph_id"] != paragraph_id
-        or type(items[0].get("uncertain")) is not bool
-        or not isinstance(items[0].get("reasons"), list)
-        or not all(isinstance(r, str) for r in items[0]["reasons"])
-    ):
-        raise ValueError("Invalid reviewer response.")
+    if not isinstance(items, list) or len(items) != 1:
+        raise ValueError(INVALID_REVIEW)
+    if not _is_verdict_for(items[0], paragraph_id):
+        raise ValueError(INVALID_REVIEW)
     return items[0]
+
+
+def _is_verdict_for(verdict: dict, paragraph_id: int) -> bool:
+    return (
+        type(verdict.get("paragraph_id")) is int
+        and verdict["paragraph_id"] == paragraph_id
+        and type(verdict.get("uncertain")) is bool
+        and _is_string_list(verdict.get("reasons"))
+    )
+
+
+def _is_string_list(value) -> bool:
+    return isinstance(value, list) and all(isinstance(r, str) for r in value)

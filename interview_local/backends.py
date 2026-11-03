@@ -127,39 +127,40 @@ class GermanWhisperXAligner:
 
     def align(self, audio: Path, transcript: dict) -> list[dict]:
         import soundfile as sf
-        from whisperx.alignment import align
 
         words = []
         with sf.SoundFile(str(audio)) as recording:
-            rate = recording.samplerate
             for segment in transcript["segments"]:
-                # Load one ASR segment instead of the entire interview into alignment memory.
-                start = max(0, int(segment["start"] * rate))
-                end = min(len(recording), int(segment["end"] * rate))
-                recording.seek(start)
-                chunk = recording.read(end - start, dtype="float32")
-                if not len(chunk):
-                    words.extend(segment_words(segment, "whisper_fallback"))
-                    continue
-                duration = len(chunk) / rate
-                aligned = align(
-                    [{"start": 0.0, "end": duration, "text": segment["text"]}],
-                    self.model,
-                    self.metadata,
-                    chunk,
-                    "cpu",
-                    return_char_alignments=False,
-                )
-                aligned_words = aligned.get("word_segments", [])
-                # Preserve all words, including numbers and unalignable characters.
-                original = "".join(segment["text"].split())
-                recovered = "".join(w["word"] for w in aligned_words)
-                if recovered != original:
-                    words.extend(segment_words(segment, "whisper_fallback"))
-                    continue
-                words.extend(_timed_words(aligned_words, start / rate, duration))
-                print(f"Aligned through {segment['end']:.0f} seconds", flush=True)
+                words.extend(self._segment_words(recording, segment))
         return words
+
+    def _segment_words(self, recording, segment: dict) -> list[dict]:
+        """Aligned words of one segment; Whisper's words if alignment loses any."""
+        from whisperx.alignment import align
+
+        rate = recording.samplerate
+        # Load one ASR segment instead of the entire interview into alignment memory.
+        start = max(0, int(segment["start"] * rate))
+        end = min(len(recording), int(segment["end"] * rate))
+        recording.seek(start)
+        chunk = recording.read(end - start, dtype="float32")
+        if not len(chunk):
+            return segment_words(segment, "whisper_fallback")
+        duration = len(chunk) / rate
+        aligned = align(
+            [{"start": 0.0, "end": duration, "text": segment["text"]}],
+            self.model,
+            self.metadata,
+            chunk,
+            "cpu",
+            return_char_alignments=False,
+        )
+        aligned_words = aligned.get("word_segments", [])
+        # Preserve all words, including numbers and unalignable characters.
+        if not _keeps_every_character(aligned_words, segment["text"]):
+            return segment_words(segment, "whisper_fallback")
+        print(f"Aligned through {segment['end']:.0f} seconds", flush=True)
+        return _timed_words(aligned_words, start / rate, duration)
 
 
 def _disable_runtime_telemetry():
@@ -173,6 +174,11 @@ def _turns(annotation) -> list[Turn]:
         Turn(float(turn.start), float(turn.end), str(speaker))
         for turn, _, speaker in annotation.itertracks(yield_label=True)
     ]
+
+
+def _keeps_every_character(aligned_words: list[dict], text: str) -> bool:
+    recovered = "".join(w["word"] for w in aligned_words)
+    return recovered == "".join(text.split())
 
 
 def _timed_words(

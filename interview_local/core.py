@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bisect
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 AMBIGUOUS_OVERLAP_RATIO = 0.8
@@ -9,6 +10,10 @@ SEGMENT_PAUSE_SECONDS = 1.5
 SEGMENT_MAX_SECONDS = 35
 UNRELIABLE_TIMINGS = {"estimated", "whisper_fallback"}
 SEGMENT_FIELDS = ("start", "end", "text", "speaker", "uncertain", "overlap")
+SEGMENT_FLAG_LABELS = (
+    ("uncertain", "Review assignment"),
+    ("overlap", "Overlapping speech"),
+)
 
 
 @dataclass
@@ -66,29 +71,12 @@ def merge(
 
 def overlap_regions(turns: list[Turn], mapping: dict) -> list[dict]:
     """Sweep regular turns; duplicate tracks from one speaker are not overlap."""
-    events = defaultdict(Counter)
-    for turn in turns:
-        if turn.end > turn.start:
-            events[turn.start][turn.speaker] += 1
-            events[turn.end][turn.speaker] -= 1
-    active = Counter()
     regions = []
-    previous = None
-    for current, changes in sorted(events.items()):
-        speakers = sorted(mapping[s] for s, count in active.items() if count > 0)
-        if previous is not None and current > previous and len(speakers) > 1:
-            if (
-                regions
-                and regions[-1]["end"] == previous
-                and regions[-1]["speakers"] == speakers
-            ):
-                regions[-1]["end"] = current
-            else:
-                regions.append(
-                    {"start": previous, "end": current, "speakers": speakers}
-                )
-        active.update(changes)
-        previous = current
+    for start, end, speakers in _simultaneous_intervals(turns, mapping):
+        if regions and _continues_region(regions[-1], start, speakers):
+            regions[-1]["end"] = end
+        else:
+            regions.append({"start": start, "end": end, "speakers": speakers})
     return regions
 
 
@@ -118,27 +106,58 @@ def timestamp(value: float) -> str:
 
 
 def render(result: dict) -> str:
-    lines = []
-    for s in result["segments"]:
-        name = result["speakers"].get(s["speaker"], "Unassigned")
-        flags = []
-        if s.get("uncertain"):
-            flags.append("Review assignment")
-        if s.get("overlap"):
-            flags.append("Overlapping speech")
-        flag = f" [{'; '.join(flags)}]" if flags else ""
-        time_range = f"{timestamp(s['start'])} – {timestamp(s['end'])}"
-        lines.append(f"[{time_range}] {name}{flag}\n{s['text']}\n")
-    return "\n".join(lines) or "No speech detected."
+    blocks = [_rendered_segment(s, result["speakers"]) for s in result["segments"]]
+    return "\n".join(blocks) or "No speech detected."
+
+
+def _rendered_segment(segment: dict, speakers: dict) -> str:
+    name = speakers.get(segment["speaker"], "Unassigned")
+    time_range = f"{timestamp(segment['start'])} – {timestamp(segment['end'])}"
+    return f"[{time_range}] {name}{_review_flags(segment)}\n{segment['text']}\n"
+
+
+def _review_flags(segment: dict) -> str:
+    flags = [label for key, label in SEGMENT_FLAG_LABELS if segment.get(key)]
+    return f" [{'; '.join(flags)}]" if flags else ""
 
 
 def _speaker_labels(turns: list[Turn], regular_turns: list[Turn]) -> dict:
     """Letter speakers in order of their first exclusive, then regular, turn."""
-    ids = list(dict.fromkeys(t.speaker for t in turns))
-    for turn in sorted(regular_turns, key=lambda t: t.start):
-        if turn.speaker not in ids:
-            ids.append(turn.speaker)
+    ordered = [*turns, *sorted(regular_turns, key=lambda t: t.start)]
+    ids = dict.fromkeys(t.speaker for t in ordered)
     return {speaker: chr(ord("A") + i) for i, speaker in enumerate(ids)}
+
+
+def _simultaneous_intervals(
+    turns: list[Turn], mapping: dict
+) -> Iterator[tuple[float, float, list[str]]]:
+    """Consecutive sweep intervals in which more than one speaker is active."""
+    active = Counter()
+    previous = None
+    for current, changes in sorted(_speaker_events(turns).items()):
+        speakers = _active_labels(active, mapping)
+        if len(speakers) > 1:
+            yield previous, current, speakers
+        active.update(changes)
+        previous = current
+
+
+def _speaker_events(turns: list[Turn]) -> dict[float, Counter]:
+    """Per instant, how many tracks of each speaker start (+1) or end (-1)."""
+    events = defaultdict(Counter)
+    for turn in turns:
+        if turn.end > turn.start:
+            events[turn.start][turn.speaker] += 1
+            events[turn.end][turn.speaker] -= 1
+    return events
+
+
+def _active_labels(active: Counter, mapping: dict) -> list[str]:
+    return sorted(mapping[s] for s, count in active.items() if count > 0)
+
+
+def _continues_region(region: dict, start: float, speakers: list[str]) -> bool:
+    return region["end"] == start and region["speakers"] == speakers
 
 
 def _attributed_words(
@@ -151,14 +170,13 @@ def _attributed_words(
         candidates = _ranked_candidates(word, turns, turn_starts)
         simultaneous = _simultaneous_speakers(word, regions, region_starts)
         reasons = _uncertainty_reasons(word, candidates, simultaneous)
-        speaker = labels[candidates[0][1].speaker] if candidates else None
         attributed.append(
             {
                 "word_id": word_id,
                 "start": word.start,
                 "end": word.end,
                 "text": word.text.strip(),
-                "speaker": speaker,
+                "speaker": _best_speaker(candidates, labels),
                 "timing": word.timing,
                 "uncertain": bool(reasons),
                 "uncertainty_reasons": reasons,
@@ -186,6 +204,11 @@ def _ranked_candidates(
     return candidates
 
 
+def _best_speaker(candidates: list[tuple[float, Turn]], labels: dict) -> str | None:
+    """Label of the most overlapping turn; None leaves the word unassigned."""
+    return labels[candidates[0][1].speaker] if candidates else None
+
+
 def _simultaneous_speakers(
     word: Word, regions: list[dict], region_starts: list[float]
 ) -> set[str]:
@@ -210,41 +233,51 @@ def _touches(word: Word, start: float, end: float) -> bool:
 def _uncertainty_reasons(
     word: Word, candidates: list[tuple[float, Turn]], simultaneous: set[str]
 ) -> list[str]:
-    reasons = []
-    if not candidates:
-        reasons.append("no_matching_speaker")
-    if word.end <= word.start:
-        reasons.append("invalid_word_duration")
-    if word.timing in UNRELIABLE_TIMINGS:
-        reasons.append("estimated_or_fallback_timing")
-    if (
+    checks = (
+        ("no_matching_speaker", not candidates),
+        ("invalid_word_duration", word.end <= word.start),
+        ("estimated_or_fallback_timing", word.timing in UNRELIABLE_TIMINGS),
+        ("ambiguous_speaker_boundary", _ambiguous_boundary(candidates)),
+        ("overlapping_speech", bool(simultaneous)),
+    )
+    return [reason for reason, applies in checks if applies]
+
+
+def _ambiguous_boundary(candidates: list[tuple[float, Turn]]) -> bool:
+    """The runner-up turn overlaps the word nearly as much as the best one."""
+    return (
         len(candidates) > 1
         and candidates[1][0] >= candidates[0][0] * AMBIGUOUS_OVERLAP_RATIO
-    ):
-        reasons.append("ambiguous_speaker_boundary")
-    if simultaneous:
-        reasons.append("overlapping_speech")
-    return reasons
+    )
 
 
 def _segments(words: list[dict]) -> list[dict]:
     """Join consecutive words of one speaker into readable segments."""
     segments = []
-    for word in words:
-        if not word["text"]:
-            continue
+    for word in _words_with_text(words):
         if segments and _continues(segments[-1], word):
-            segment = segments[-1]
-            segment["text"] += " " + word["text"]
-            segment["end"] = max(segment["end"], word["end"])
-            segment["uncertain"] |= word["uncertain"]
-            segment["overlap"] |= word["overlap"]
-            segment["word_ids"].append(word["word_id"])
+            _append_word(segments[-1], word)
         else:
-            segment = {key: word[key] for key in SEGMENT_FIELDS}
-            segment["word_ids"] = [word["word_id"]]
-            segments.append(segment)
+            segments.append(_new_segment(word))
     return segments
+
+
+def _words_with_text(words: list[dict]) -> list[dict]:
+    return [w for w in words if w["text"]]
+
+
+def _append_word(segment: dict, word: dict) -> None:
+    segment["text"] += " " + word["text"]
+    segment["end"] = max(segment["end"], word["end"])
+    segment["uncertain"] |= word["uncertain"]
+    segment["overlap"] |= word["overlap"]
+    segment["word_ids"].append(word["word_id"])
+
+
+def _new_segment(word: dict) -> dict:
+    segment = {key: word[key] for key in SEGMENT_FIELDS}
+    segment["word_ids"] = [word["word_id"]]
+    return segment
 
 
 def _continues(segment: dict, word: dict) -> bool:

@@ -9,16 +9,25 @@ class FakeClient:
         speaker="A",
         split=False,
         review_id_offset=0,
+        paragraph_fields=None,
+        review_fields=None,
     ):
         self.invalid_edits = invalid_edits
         self.wording = wording
         self.speaker = speaker
         self.split = split
         self.review_id_offset = review_id_offset
+        self.paragraph_fields = paragraph_fields or {}
+        self.review_fields = review_fields or {}
         self.unloaded = False
+        self.prepared = False
 
     def ready(self):
         return {"model": "fake-local-test"}
+
+    def prepare(self, status=print):
+        self.prepared = True
+        return self.ready()
 
     def unload(self):
         self.unloaded = True
@@ -32,6 +41,7 @@ class FakeClient:
                     "paragraph_id": p["paragraph_id"] + self.review_id_offset,
                     "uncertain": False,
                     "reasons": [],
+                    **self.review_fields,
                 }
                 for p in data["paragraphs"]
             ]
@@ -55,4 +65,5 @@ class FakeClient:
             "text": self.wording or " ".join(w["t"] for w in words),
             "uncertain": False,
             "reason": "Grouped into a readable paragraph.",
+            **self.paragraph_fields,
         }

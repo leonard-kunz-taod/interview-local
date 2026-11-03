@@ -49,14 +49,19 @@ def readable_markdown(result: dict) -> str:
 
 def _readable_document(result: dict, title_marker: str, heading_marker: str) -> str:
     reviewed = result.get("stage") == "review"
-    title = "Reviewed transcript" if reviewed else "Readable transcript — LLM draft"
-    lines = [title_marker + title, "", DRAFT_NOTICE, ""]
+    lines = [title_marker + _document_title(result), "", DRAFT_NOTICE, ""]
     for p in result["paragraphs"]:
         lines += [heading_marker + _paragraph_heading(result["speakers"], p), ""]
         lines += [p["text"], ""]
         if reviewed and p.get("review_reasons"):
             lines += ["Review: " + "; ".join(p["review_reasons"]), ""]
     return "\n".join(lines)
+
+
+def _document_title(result: dict) -> str:
+    if result.get("stage") == "review":
+        return "Reviewed transcript"
+    return "Readable transcript — LLM draft"
 
 
 def _paragraph_heading(speakers: dict, paragraph: dict) -> str:

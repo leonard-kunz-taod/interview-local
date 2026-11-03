@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from interview_local.pipeline import process, transcribe
+from interview_local.pipeline import prepare, process, transcribe
 
 WORDS = [{"start": 0, "end": 1, "text": "Hallo", "timing": "aligned"}]
 TURNS = [{"start": 0, "end": 1, "speaker": "s0"}]
@@ -21,10 +21,12 @@ class FakeWorker:
         self.outputs = outputs
         self.stages = []
         self.workspaces = []
+        self.tokens = set()
 
-    def __call__(self, stage, source, target, *args):
+    def __call__(self, stage, source, target, status=None, token=None, offline=False):
         self.stages.append(stage)
         self.workspaces.append(target.parent)
+        self.tokens.add(token)
         if stage == "decode":
             target.touch()
         elif stage in self.outputs:
@@ -95,6 +97,22 @@ class ProcessTests(unittest.TestCase):
         _, result = self.run_process(outputs, alignment=True)
         self.assertFalse(result["overlap_detection_available"])
 
+    def test_regular_turns_enable_overlap_detection(self):
+        _, result = self.run_process(OUTPUTS, alignment=True)
+        self.assertTrue(result["overlap_detection_available"])
+
+    def test_speaker_stage_is_saved_to_the_output_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "test.wav"
+            audio.touch()
+            output = Path(directory) / "output"
+            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+                process(audio, status=silent, alignment=True, output_dir=output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            saved, ["01_raw.json", "01_raw.txt", "02_speakers.json", "02_speakers.txt"]
+        )
+
 
 class TranscribeTests(unittest.TestCase):
     def test_raw_transcription_stops_after_speech_recognition(self):
@@ -115,6 +133,23 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual(
             raw,
             {"schema_version": 2, "stage": "raw", "source": "test.wav", "segments": []},
+        )
+
+
+class PrepareTests(unittest.TestCase):
+    def prepared_stages(self, **options):
+        worker = FakeWorker({})
+        with patch("interview_local.pipeline.worker", worker):
+            prepare(status=silent, **options)
+        return worker.stages
+
+    def test_preparation_loads_diarization_and_speech_models(self):
+        self.assertEqual(self.prepared_stages(), ["prepare-diarize", "prepare-asr"])
+
+    def test_preparation_with_alignment_also_loads_the_alignment_model(self):
+        self.assertEqual(
+            self.prepared_stages(alignment=True),
+            ["prepare-diarize", "prepare-asr", "prepare-align"],
         )
 
 

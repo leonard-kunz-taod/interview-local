@@ -74,9 +74,31 @@ class ReadinessTests(unittest.TestCase):
             "http://example.org",
             "http://localhost@evil.org",
             "http://127.0.0.1/redirect",
+            "http://user:secret@127.0.0.1:11434",
+            "http://127.0.0.1:11434/?model=x",
+            "http://127.0.0.1:11434/#fragment",
         ):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 OllamaClient(url)
+
+    def test_loopback_endpoints_are_accepted_without_a_trailing_slash(self):
+        urls = ("http://127.0.0.1:11434/", "http://localhost:11434", "http://[::1]")
+        self.assertEqual(
+            [OllamaClient(url).base_url for url in urls],
+            ["http://127.0.0.1:11434", "http://localhost:11434", "http://[::1]"],
+        )
+
+    def test_remote_model_reference_is_rejected_as_cloud_backed(self):
+        show = body({"remote_model": "ministral-cloud"})
+        service = FakeOllamaService(dict(INSTALLED, **{"/api/show": show}))
+        with self.assertRaisesRegex(RuntimeError, "Cloud-backed"):
+            client_for(service).ready()
+
+    def test_other_installed_models_do_not_count_as_the_editor(self):
+        tags = body({"models": [{"name": "llama3:8b", "digest": "zzz"}]})
+        service = FakeOllamaService(dict(INSTALLED, **{"/api/tags": tags}))
+        with self.assertRaisesRegex(RuntimeError, "is not installed locally"):
+            client_for(service).ready()
 
 
 class PreparationTests(unittest.TestCase):

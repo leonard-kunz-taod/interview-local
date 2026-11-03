@@ -35,55 +35,25 @@ def main() -> None:
 
 def run(stage: str, source: Path, target: Path) -> None:
     """Run one processing stage; stages with a result write it to target as JSON."""
-    from dataclasses import asdict
+    if stage not in STAGES:
+        raise ValueError("Unknown processing stage")
+    STAGES[stage](source, target)
 
-    from .backends import (
-        CommunityDiarizer,
-        FasterWhisperTranscriber,
-        GermanWhisperXAligner,
-    )
+
+def check_access(source: Path, target: Path) -> None:
+    """Verify Hub access to community-1 unless a complete local copy exists."""
     from .models import DIARIZATION_ID, hub_offline, local_diarization_model
 
-    if stage == "check-access":
-        if local_diarization_model():
-            return
-        from huggingface_hub import hf_hub_download
+    if local_diarization_model():
+        return
+    from huggingface_hub import hf_hub_download
 
-        hf_hub_download(
-            DIARIZATION_ID,
-            "config.yaml",
-            token=os.environ.get("HF_TOKEN") or None,
-            local_files_only=hub_offline(),
-        )
-        return
-    if stage == "decode":
-        decode(source, target)
-        return
-    if stage == "asr":
-        result = FasterWhisperTranscriber().transcribe(source)
-    elif stage == "diarize":
-        result = asdict(CommunityDiarizer().diarize(source))
-    elif stage == "align":
-        transcript = json.loads(
-            source.with_name("asr.json").read_text(encoding="utf-8")
-        )
-        result = GermanWhisperXAligner().align(source, transcript)
-    elif stage == "prepare-asr":
-        FasterWhisperTranscriber()
-        return
-    elif stage == "prepare-diarize":
-        CommunityDiarizer()
-        return
-    elif stage == "prepare-align":
-        GermanWhisperXAligner()
-        import nltk
-
-        if not nltk.download("punkt_tab", quiet=True):
-            raise RuntimeError("Could not download NLTK language data.")
-        return
-    else:
-        raise ValueError("Unknown processing stage")
-    target.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    hf_hub_download(
+        DIARIZATION_ID,
+        "config.yaml",
+        token=os.environ.get("HF_TOKEN") or None,
+        local_files_only=hub_offline(),
+    )
 
 
 def decode(source: Path, target: Path) -> None:
@@ -119,6 +89,57 @@ def _resampled(container, resampler):
         yield chunk.to_ndarray().reshape(-1)
 
 
+def transcribe(source: Path, target: Path) -> None:
+    from .backends import FasterWhisperTranscriber
+
+    _save_result(target, FasterWhisperTranscriber().transcribe(source))
+
+
+def diarize(source: Path, target: Path) -> None:
+    from dataclasses import asdict
+
+    from .backends import CommunityDiarizer
+
+    _save_result(target, asdict(CommunityDiarizer().diarize(source)))
+
+
+def align(source: Path, target: Path) -> None:
+    """Align the asr.json transcript saved next to the decoded audio."""
+    from .backends import GermanWhisperXAligner
+
+    transcript = json.loads(source.with_name("asr.json").read_text(encoding="utf-8"))
+    _save_result(target, GermanWhisperXAligner().align(source, transcript))
+
+
+def prepare_transcriber(source: Path, target: Path) -> None:
+    """Download or verify the speech recognition model; nothing is saved."""
+    from .backends import FasterWhisperTranscriber
+
+    FasterWhisperTranscriber()
+
+
+def prepare_diarizer(source: Path, target: Path) -> None:
+    """Download or verify the diarization model; nothing is saved."""
+    from .backends import CommunityDiarizer
+
+    CommunityDiarizer()
+
+
+def prepare_aligner(source: Path, target: Path) -> None:
+    """Download or verify the alignment model and its language data."""
+    from .backends import GermanWhisperXAligner
+
+    GermanWhisperXAligner()
+    import nltk
+
+    if not nltk.download("punkt_tab", quiet=True):
+        raise RuntimeError("Could not download NLTK language data.")
+
+
+def _save_result(target: Path, result) -> None:
+    target.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+
+
 def _report_peak_memory() -> None:
     try:
         import platform
@@ -136,6 +157,18 @@ def _redacted(message: str) -> str:
     if token:
         message = message.replace(token, REDACTED)
     return re.sub(HF_TOKEN_PATTERN, REDACTED, message)
+
+
+STAGES = {
+    "check-access": check_access,
+    "decode": decode,
+    "asr": transcribe,
+    "diarize": diarize,
+    "align": align,
+    "prepare-asr": prepare_transcriber,
+    "prepare-diarize": prepare_diarizer,
+    "prepare-align": prepare_aligner,
+}
 
 
 if __name__ == "__main__":

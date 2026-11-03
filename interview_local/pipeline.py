@@ -83,9 +83,8 @@ def process(
         raw = _recognize_speech(source, run)
         status("Checking local community-1 model / Hugging Face access if needed")
         run.stage("check-access", source, run.work / "access")
-        timed_words = _aligned_words(run) if alignment else _whisper_words(raw, run)
+        words = _aligned_words(run) if alignment else _whisper_words(raw, run)
         turns, regular = _diarization(run)
-        words = [Word(**w) for w in timed_words]
         status("5/5 Merge words and speaker turns, including overlap markers")
         result = merge(words, turns, regular)
         result["stage"] = "speakers"
@@ -115,8 +114,6 @@ def worker(stage, source, target, status=print, token=None, offline=False) -> No
         RuntimeError: The stage failed; the message ends with its last output lines.
     """
     env = _worker_environment(token, offline)
-    secret = env.get("HF_TOKEN")
-    tail = []
     command = [sys.executable, "-m", "interview_local.worker", stage]
     with subprocess.Popen(
         [*command, str(source), str(target)],
@@ -128,13 +125,7 @@ def worker(stage, source, target, status=print, token=None, offline=False) -> No
         errors="replace",
     ) as proc:
         try:
-            for line in proc.stdout:
-                line = line.strip()
-                if secret:
-                    line = line.replace(secret, "[Token redacted]")
-                tail = [*tail, line][-FAILURE_DETAIL_LINES:]
-                if line.startswith(FORWARDED_OUTPUT):
-                    status(line)
+            tail = _relayed_output(proc.stdout, status, env.get("HF_TOKEN"))
             code = proc.wait()
         except BaseException:
             _terminate(proc)
@@ -207,15 +198,15 @@ def _recognize_speech(source: Path, run: _Run) -> dict:
     return raw
 
 
-def _aligned_words(run: _Run) -> list[dict]:
+def _aligned_words(run: _Run) -> list[Word]:
     run.status(STEPS["align"])
     run.stage("align", run.audio, run.work / "words.json")
-    return _read_json(run.work / "words.json")
+    return [Word(**w) for w in _read_json(run.work / "words.json")]
 
 
-def _whisper_words(raw: dict, run: _Run) -> list[dict]:
+def _whisper_words(raw: dict, run: _Run) -> list[Word]:
     run.status("3/5 Use Whisper word timestamps (no additional alignment)")
-    return [w for s in raw["segments"] for w in segment_words(s, "whisper")]
+    return [Word(**w) for s in raw["segments"] for w in segment_words(s, "whisper")]
 
 
 def _diarization(run: _Run) -> tuple[list[Turn], list[Turn] | None]:
@@ -225,9 +216,12 @@ def _diarization(run: _Run) -> tuple[list[Turn], list[Turn] | None]:
     diarization = _read_json(run.work / "turns.json")
     # Legacy fixtures and earlier cached outputs contain exclusive turns only.
     if isinstance(diarization, list):
-        return [Turn(**t) for t in diarization], None
-    exclusive = [Turn(**t) for t in diarization["exclusive"]]
-    return exclusive, [Turn(**t) for t in diarization["regular"]]
+        return _turns(diarization), None
+    return _turns(diarization["exclusive"]), _turns(diarization["regular"])
+
+
+def _turns(records: list[dict]) -> list[Turn]:
+    return [Turn(**t) for t in records]
 
 
 def _metadata(source: Path, words: list[Word], alignment: bool, detected: int) -> dict:
@@ -260,6 +254,19 @@ def _worker_environment(token: str | None, offline: bool) -> dict:
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
     return env
+
+
+def _relayed_output(lines, status: Callable, secret: str | None) -> list[str]:
+    """Forward progress lines with the token redacted; return the last lines."""
+    tail = []
+    for line in lines:
+        line = line.strip()
+        if secret:
+            line = line.replace(secret, "[Token redacted]")
+        tail = [*tail, line][-FAILURE_DETAIL_LINES:]
+        if line.startswith(FORWARDED_OUTPUT):
+            status(line)
+    return tail
 
 
 def _terminate(proc: subprocess.Popen) -> None:

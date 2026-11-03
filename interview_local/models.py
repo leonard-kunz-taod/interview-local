@@ -5,6 +5,9 @@ from pathlib import Path
 
 DIARIZATION_ID = "pyannote/speaker-diarization-community-1"
 WHISPER_MODEL = "large-v3"
+BUNDLED_DIARIZATION_MODEL = (
+    Path(__file__).resolve().parent.parent / "models" / "community-1"
+)
 
 
 def local_diarization_model() -> Path | None:
@@ -15,11 +18,9 @@ def local_diarization_model() -> Path | None:
     """
     configured = os.environ.get("INTERVIEW_DIARIZATION_MODEL")
     candidate = (
-        Path(configured).expanduser()
-        if configured
-        else Path(__file__).resolve().parent.parent / "models" / "community-1"
+        Path(configured).expanduser() if configured else BUNDLED_DIARIZATION_MODEL
     )
-    if candidate.is_dir() and (candidate / "config.yaml").is_file():
+    if (candidate / "config.yaml").is_file():
         return candidate.resolve()
     if configured:
         raise ValueError(
