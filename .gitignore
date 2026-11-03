@@ -1,0 +1,15 @@
+.venv/
+.cache/
+__pycache__/
+*.egg-info/
+.env
+.env.*
+*.wav
+*.mp3
+*.m4a
+transcripts/
+.DS_Store
+.installer/
+test_data/
+*.flac
+models/

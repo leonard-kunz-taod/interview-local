@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "interview-local"
+version = "0.2.0"
+description = "Local German interview transcription with two speakers"
+requires-python = ">=3.11,<3.13"
+dependencies = ["onnxruntime>=1.20,<2", "psutil>=6,<8", "av>=14,<19", "soundfile>=0.13,<1", "numpy>=2,<3", "faster-whisper>=1.2,<2", "pyannote.audio>=4,<5", "whisperx>=3.7,<3.9", "torch>=2.8,<2.9", "torchcodec>=0.7,<0.8", "torchaudio>=2.8,<2.9", "transformers>=4.48,<5", "huggingface-hub>=0.34,<1"]
+[project.scripts]
+interview-local = "interview_local.cli:main"
+[tool.setuptools.packages.find]
+include = ["interview_local*"]

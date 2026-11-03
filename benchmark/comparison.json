@@ -1,0 +1,53 @@
+{
+  "test_date": "2026-11-03",
+  "source": "https://catalog.ldc.upenn.edu/LDC2026S06",
+  "reference_sha256": "c55d622648be2fb0432d63395d7ac94210f172b869824e685643ccd2ca37d753",
+  "audio_sha256": "fe7e707e25bd163a1936ec430985432882769aed800e3edd2da86714a7463772",
+  "default_without_alignment": {
+    "reference_words": 338,
+    "hypothesis_words": 310,
+    "word_errors": 86,
+    "wer": 0.25443786982248523,
+    "reference_offset_seconds": 119.0,
+    "evaluated_start": 0.71,
+    "evaluated_end": 103.22,
+    "normalization": "Lowercase Unicode words/numbers; punctuation and noise labels removed; no number expansion",
+    "caveat": "Single sample with dialect and overlapping speech; WER ordering is ambiguous during overlap.",
+    "der": {
+      "total": 99.28000000000006,
+      "confusion": 2.697562499999951,
+      "false alarm": 0.24999999999999378,
+      "correct": 75.41675000000004,
+      "missed detection": 21.165687500000068,
+      "diarization error rate": 0.2428812449637389
+    },
+    "der_conditions": "250-ms collar; overlap included; utterance-level reference intervals; optimal global label mapping",
+    "cpwer": 0.3757396449704142
+  },
+  "optional_with_alignment": {
+    "reference_words": 338,
+    "hypothesis_words": 312,
+    "word_errors": 88,
+    "wer": 0.2603550295857988,
+    "reference_offset_seconds": 119.0,
+    "evaluated_start": 0.71,
+    "evaluated_end": 103.22,
+    "normalization": "Lowercase Unicode words/numbers; punctuation and noise labels removed; no number expansion",
+    "caveat": "Single sample with dialect and overlapping speech; WER ordering is ambiguous during overlap.",
+    "der": {
+      "total": 99.28000000000006,
+      "missed detection": 21.165687500000068,
+      "confusion": 2.697562499999951,
+      "correct": 75.41675000000004,
+      "false alarm": 0.24999999999999378,
+      "diarization error rate": 0.2428812449637389
+    },
+    "der_conditions": "250-ms collar; overlap included; utterance-level reference intervals; optimal global label mapping",
+    "cpwer": 0.44970414201183434
+  },
+  "model_revisions": {
+    "models--pyannote--speaker-diarization-community-1": "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
+    "models--Systran--faster-whisper-large-v3": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+    "models--facebook--wav2vec2-base-10k-voxpopuli-ft-de": "1cbaf198475e1af97cc479ca081ce4ddd2d6b5cf"
+  }
+}
