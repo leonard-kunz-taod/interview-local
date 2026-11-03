@@ -67,7 +67,7 @@ def write_json(path, value):
 
 
 def speaker_transcript():
-    return merge(interview_words(), INTERVIEW_TURNS)
+    return merge(interview_words(), INTERVIEW_TURNS, [])
 
 
 class CommandLineTestCase(unittest.TestCase):

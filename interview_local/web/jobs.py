@@ -5,23 +5,26 @@ import os
 from pathlib import Path
 import threading
 import traceback
+from typing import Final, Literal
 import uuid
 
 from ..artifacts import save_readable, save_speakers
 from ..llm import OllamaClient, enhance
 from ..pipeline import STEPS, process
 
-PHASE_SPEECH_RECOGNITION = "speech_recognition"
-PHASE_SPEAKER_RECOGNITION = "speaker_recognition"
-PHASE_LLM = "llm"
+JobState = Literal["running", "done", "failed"]
+JobPhase = Literal["speech_recognition", "speaker_recognition", "llm"]
+PHASE_SPEECH_RECOGNITION: Final = "speech_recognition"
+PHASE_SPEAKER_RECOGNITION: Final = "speaker_recognition"
+PHASE_LLM: Final = "llm"
 
 
 @dataclass(frozen=True)
 class JobStatus:
     """A snapshot of a job's progress for the browser."""
     run_id: str
-    state: str
-    phase: str
+    state: JobState
+    phase: JobPhase
     detail: str
     error: str | None
 
@@ -35,8 +38,8 @@ class TranscriptionJob:
         self.audio = audio
         self.speaker_names = dict(speaker_names)
         self._lock = threading.Lock()
-        self._state = "running"
-        self._phase = PHASE_SPEECH_RECOGNITION
+        self._state: JobState = "running"
+        self._phase: JobPhase = PHASE_SPEECH_RECOGNITION
         self._detail = "Starting"
         self._error: str | None = None
 
@@ -85,7 +88,7 @@ class TranscriptionJob:
         with self._lock:
             self._detail = message
 
-    def _enter_phase(self, phase: str) -> None:
+    def _enter_phase(self, phase: JobPhase) -> None:
         with self._lock:
             self._phase = phase
 

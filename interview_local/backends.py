@@ -1,6 +1,12 @@
 """Model adapters. Import only inside the short-lived worker."""
+from __future__ import annotations
 from pathlib import Path
+from typing import TYPE_CHECKING
 from .core import Turn, DiarizationResult
+
+if TYPE_CHECKING:
+    import numpy as np
+    from soundfile import SoundFile
 
 WHISPER = "large-v3"
 DIARIZATION = "pyannote/speaker-diarization-community-1"
@@ -91,7 +97,7 @@ class GermanWhisperXAligner:
                 words.extend(self._align_segment(recording, segment))
         return words
 
-    def _align_segment(self, recording, segment: dict) -> list[dict]:
+    def _align_segment(self, recording: SoundFile, segment: dict) -> list[dict]:
         from whisperx.alignment import align
         chunk, offset = read_segment(recording, segment)
         if not len(chunk):
@@ -99,14 +105,14 @@ class GermanWhisperXAligner:
         duration = len(chunk) / recording.samplerate
         aligned = align([dict(start=0., end=duration, text=segment["text"])],
                         self.model, self.metadata, chunk, "cpu", return_char_alignments=False)
-        aligned_words = aligned.get("word_segments", [])
+        aligned_words = aligned["word_segments"]
         # Preserve all words, including numbers and unalignable characters.
         if not keeps_every_character(aligned_words, segment["text"]):
             return fallback_words(segment)
         print(f"Aligned through {segment['end']:.0f} seconds", flush=True)
         return [timed_word(w, offset, duration) for w in aligned_words]
 
-def read_segment(recording, segment: dict):
+def read_segment(recording: SoundFile, segment: dict) -> tuple[np.ndarray, float]:
     """Load one ASR segment instead of the entire interview into alignment memory.
 
     Returns:
@@ -127,8 +133,8 @@ def timed_word(aligned_word: dict, offset: float, duration: float) -> dict:
     return dict(start=aligned_word.get("start", 0.) + offset, end=aligned_word.get("end", duration) + offset,
                 text=aligned_word["word"], timing="aligned" if timed else "estimated", probability=None)
 
-def fallback_words(segment):
-    if segment.get("words"):
+def fallback_words(segment: dict) -> list[dict]:
+    if segment["words"]:
         return [dict(w, timing="whisper_fallback") for w in segment["words"]]
     return [dict(start=segment["start"], end=segment["end"], text=segment["text"], timing="estimated",
                  probability=None)]

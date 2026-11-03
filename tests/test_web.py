@@ -294,6 +294,10 @@ class EditorApiTests(unittest.TestCase):
         send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/speakers", {"A": "Bernd", "B": "Anna"})
         self.assertEqual([p["speaker_name"] for p in self.document()["paragraphs"]], ["Bernd", "Anna"])
 
+    def test_speaker_name_that_is_no_text_is_rejected(self):
+        status, _, body = send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/speakers", {"A": "Anna", "B": 7})
+        self.assertEqual((status, json.loads(body)["error"]), (400, "Speaker names must be text."))
+
     def test_stage_files_stay_unchanged_after_corrections(self):
         before = stage_file_contents(self.run_dir)
         send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/paragraphs/4/text", {"text": "Danke."})

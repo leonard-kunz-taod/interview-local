@@ -17,7 +17,7 @@ import urllib.parse
 import webbrowser
 
 from ..artifacts import corrected_text
-from ..corrections import (edit_paragraph_text, load_corrected_paragraphs, load_speaker_names,
+from ..corrections import (CorrectedParagraph, edit_paragraph_text, load_corrected_paragraphs, load_speaker_names,
                            readable_source_words, reassign_words, save_corrections)
 from ..editor_document import build_editor_document
 from .jobs import TranscriptionJob
@@ -296,9 +296,11 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
 
     def _rename_speakers(self, run_id: str) -> None:
         names = self._json_body()
+        if not all(isinstance(name, str) for name in names.values()):
+            raise ValueError("Speaker names must be text.")
         self._update_corrections(run_id, lambda readable, paragraphs, speakers: (paragraphs, names))
 
-    def _update_corrections(self, run_id: str, change) -> None:
+    def _update_corrections(self, run_id: str, change: CorrectionChange) -> None:
         run_dir = self._run_dir(run_id)
         with self.state.corrections_lock:
             readable = load_readable(run_dir)
@@ -359,6 +361,10 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+
+CorrectionChange = Callable[[dict, list[CorrectedParagraph], dict[str, str]],
+                            tuple[list[CorrectedParagraph], dict[str, str]]]
 
 
 @dataclass(frozen=True)

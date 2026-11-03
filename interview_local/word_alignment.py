@@ -8,6 +8,7 @@ from typing import Literal
 from .llm import tokens
 
 Change = Literal["unchanged", "replaced", "inserted"]
+Operation = Literal["replace", "delete", "insert", "equal"]
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,7 @@ class _Opcode:
     ``next_display_index`` is the display word at the opcode's text position, or the last
     display word when the opcode lies behind the end of the text.
     """
-    operation: str
+    operation: Operation
     display_indexes: list[int]
     source_ids: list[int]
     next_display_index: int
@@ -99,7 +100,8 @@ def _token_opcodes(text_tokens: list[tuple[str, int]], source_tokens: list[tuple
     return [_resolve(opcode, text_tokens, source_tokens) for opcode in matcher.get_opcodes()]
 
 
-def _resolve(opcode: tuple, text_tokens: list[tuple[str, int]], source_tokens: list[tuple[str, int]]) -> _Opcode:
+def _resolve(opcode: tuple[Operation, int, int, int, int], text_tokens: list[tuple[str, int]],
+             source_tokens: list[tuple[str, int]]) -> _Opcode:
     operation, text_begin, text_end, source_begin, source_end = opcode
     next_token = text_tokens[min(text_begin, len(text_tokens) - 1)]
     return _Opcode(operation=operation,

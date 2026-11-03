@@ -29,7 +29,7 @@ class FakeClient:
 
 class OverlapTests(unittest.TestCase):
     def test_regular_overlap_uses_shared_speaker_mapping(self):
-        source = merge([Word(.2,.8,"Hello",.9),Word(1.1,1.3,"yes",.9)],
+        source = merge([Word(.2,.8,"Hello",.9, "whisper"),Word(1.1,1.3,"yes",.9, "whisper")],
             [Turn(0,1,"first"),Turn(1,3,"second")],
             [Turn(0,1.5,"first"),Turn(1,3,"second")])
         self.assertEqual(source["overlaps"],[dict(start=1,end=1.5,speakers=["A","B"])])
@@ -39,11 +39,10 @@ class OverlapTests(unittest.TestCase):
         self.assertEqual(source["words"][1]["speaker"],"B")
     def test_duplicate_tracks_and_touching_boundaries_are_not_overlap(self):
         self.assertEqual(overlap_regions([Turn(0,2,"x"),Turn(1,2,"x"),Turn(2,3,"y")],{"x":"A","y":"B"}),[])
-        self.assertFalse(merge([],[])["overlap_detection_available"])
 
 class LLMTests(unittest.TestCase):
     def source(self):
-        return merge([Word(0,.3,"Hello",.9),Word(.3,.7,"there.",.9)],[Turn(0,1,"speaker")])
+        return merge([Word(0,.3,"Hello",.9, "whisper"),Word(.3,.7,"there.",.9, "whisper")],[Turn(0,1,"speaker")], [])
     def test_edit_preserves_source_and_human_readable_exports(self):
         source = self.source()
         before = copy.deepcopy(source)
@@ -84,7 +83,7 @@ class LLMTests(unittest.TestCase):
         with self.assertRaises(ValueError): review(edited,client=FakeClient())
     def test_wording_changes_stay_uncertain_even_when_reviewer_agrees(self):
         text = "one two three four five six seven eight nine ten"
-        source = merge([Word(i,i+.5,t,.9) for i,t in enumerate(text.split())],[Turn(0,11,"s")])
+        source = merge([Word(i,i+.5,t,.9, "whisper") for i,t in enumerate(text.split())],[Turn(0,11,"s")], [])
         edited = enhance(source,client=FakeClient(wording="one two three four five six seven eight nine"),status=lambda _:None)
         self.assertTrue(edited["paragraphs"][0]["content_changed"])
         checked = review(edited,client=FakeClient(),status=lambda _:None)

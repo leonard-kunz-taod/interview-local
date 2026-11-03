@@ -27,7 +27,8 @@ DECODED_AUDIO = "original.wav"
 REQUESTED_SPEAKERS = 2
 
 
-def worker(stage, source, target, status=print, token=None, offline=False):
+def worker(stage: str, source: Path, target: Path, status: Callable[[str], None], token: str | None,
+           offline: bool = False) -> None:
     env = worker_environment(token)
     if offline:
         env.update(OFFLINE_ENVIRONMENT)
@@ -91,9 +92,9 @@ def stage_failure(stage: str, detail: str) -> RuntimeError:
 
 @dataclass(frozen=True)
 class StageRun:
-    """One processing run: its temporary work directory, optional artifact directory and worker settings."""
+    """One processing run: its temporary work directory, artifact directory and worker settings."""
     work: Path
-    output_dir: Path | None
+    output_dir: Path
     status: Callable[[str], None]
     token: str | None
     offline: bool
@@ -106,11 +107,10 @@ class StageRun:
         return json.loads((self.work / name).read_text(encoding="utf-8"))
 
 
-def process(source: Path, status=print, token=None, offline=False, alignment=False,
-            output_dir: Path | None = None, raw_only=False) -> dict:
+def process(source: Path, output_dir: Path, status: Callable[[str], None] = print, token: str | None = None,
+            offline: bool = False, alignment: bool = False, raw_only: bool = False) -> dict:
     source = audio_source(source)
-    if output_dir is not None:
-        output_dir = claim_output_dir(Path(output_dir))
+    output_dir = claim_output_dir(output_dir)
     with tempfile.TemporaryDirectory(prefix="interview-local-") as directory:
         run = StageRun(Path(directory), output_dir, status, token, offline)
         raw = recognize_speech(run, source)
@@ -139,15 +139,14 @@ def claim_output_dir(output_dir: Path) -> Path:
 
 
 def recognize_speech(run: StageRun, source: Path) -> dict:
-    """Decode and transcribe the audio; save the raw transcript if the run has an output directory."""
+    """Decode and transcribe the audio and save the raw transcript."""
     from .artifacts import save_raw
     audio = run.work / DECODED_AUDIO
     run.execute("decode", source, audio)
     run.execute("asr", audio, run.work / "asr.json")
     raw = dict(schema_version=2, stage="raw", source=source.name, **run.read_json("asr.json"))
-    if run.output_dir is not None:
-        save_raw(raw, run.output_dir)
-        run.status(f"Original speech recognition output saved: {run.output_dir / '01_raw.txt'}")
+    save_raw(raw, run.output_dir)
+    run.status(f"Original speech recognition output saved: {run.output_dir / '01_raw.txt'}")
     return raw
 
 
@@ -169,7 +168,7 @@ def as_whisper_timing(word: dict) -> dict:
 
 
 def attribute_speakers(run: StageRun, raw: dict, raw_words: list[dict], alignment: bool) -> dict:
-    """Diarize, merge words and speaker turns, and save the speaker transcript if the run has an output directory."""
+    """Diarize, merge words and speaker turns, and save the speaker transcript."""
     from .artifacts import save_speakers
     run.execute("diarize", run.work / DECODED_AUDIO, run.work / "turns.json")
     words = [Word(**w) for w in raw_words]
@@ -179,15 +178,12 @@ def attribute_speakers(run: StageRun, raw: dict, raw_words: list[dict], alignmen
     result["stage"] = "speakers"
     result["raw_transcript"] = raw
     result["metadata"] = speaker_metadata(words, result["speakers"], raw["source"], alignment)
-    if run.output_dir is not None:
-        save_speakers(result, run.output_dir)
+    save_speakers(result, run.output_dir)
     return result
 
 
-def diarization_turns(diarization) -> tuple[list[Turn], list[Turn] | None]:
-    """Exclusive and regular turns; legacy fixtures and earlier cached outputs contain exclusive turns only."""
-    if isinstance(diarization, list):
-        return as_turns(diarization), None
+def diarization_turns(diarization: dict[str, list[dict]]) -> tuple[list[Turn], list[Turn]]:
+    """Exclusive and regular turns of the diarize stage's output."""
     return as_turns(diarization["exclusive"]), as_turns(diarization["regular"])
 
 

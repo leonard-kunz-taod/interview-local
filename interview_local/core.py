@@ -1,10 +1,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol, TypeVar
 import bisect
 import json
 from pathlib import Path
 
+Timing = Literal["whisper", "whisper_fallback", "aligned", "estimated"]
 WHISPER_TIMINGS = frozenset({"whisper", "whisper_fallback"})
 AMBIGUOUS_OVERLAP_RATIO = .8
 SEGMENT_MAX_PAUSE_SECONDS = 1.5
@@ -23,7 +24,7 @@ class Word:
     end: float
     text: str
     probability: float | None
-    timing: str = "whisper"
+    timing: Timing
 
     def __post_init__(self):
         has_whisper_timing = self.timing in WHISPER_TIMINGS
@@ -72,19 +73,18 @@ def overlap_regions(turns: list[Turn], mapping: dict) -> list[dict]:
     return regions
 
 
-def merge(words: list[Word], turns: list[Turn], regular_turns: list[Turn] | None = None) -> dict:
+def merge(words: list[Word], turns: list[Turn], regular_turns: list[Turn]) -> dict:
     """Assign words by exclusive overlap; separately retain simultaneous voices."""
     turns = sorted(turns, key=lambda t: (t.start, t.end))
-    regular = regular_turns or []
-    mapping = _speaker_letters(turns, regular)
-    regions = overlap_regions(regular, mapping)
+    mapping = _speaker_letters(turns, regular_turns)
+    regions = overlap_regions(regular_turns, mapping)
     assigner = _WordAssigner(turns, regions, mapping)
     assigned = [assigner.assign(word_id, word) for word_id, word in enumerate(words)]
     return dict(schema_version=2, language="de",
         speakers={letter: f"Speaker {letter}" for letter in mapping.values()},
         segments=_group_segments(assigned), words=assigned, diarization=_lettered_turns(turns, mapping),
-        regular_diarization=_lettered_turns(regular, mapping), overlaps=regions,
-        overlap_detection_available=regular_turns is not None)
+        regular_diarization=_lettered_turns(regular_turns, mapping), overlaps=regions,
+        overlap_detection_available=True)
 
 
 def _speaker_letters(turns: list[Turn], regular_turns: list[Turn]) -> dict[str, str]:
@@ -126,7 +126,10 @@ class _WordAssigner:
         return {speaker for r in nearby if _touches(word, r["start"], r["end"]) for speaker in r["speakers"]}
 
 
-def _spans_near(word: Word, spans: list, starts: list[float]) -> list:
+Span = TypeVar("Span")
+
+
+def _spans_near(word: Word, spans: list[Span], starts: list[float]) -> list[Span]:
     """Spans sorted by start, from the last one starting at or before the word through the last one starting
     no later than its end."""
     first = max(0, bisect.bisect_right(starts, word.start) - 1)

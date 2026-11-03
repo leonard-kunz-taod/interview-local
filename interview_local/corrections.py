@@ -148,9 +148,8 @@ def validate_speaker_names(names: dict[str, str], readable: dict) -> None:
         raise ValueError("Speaker names must not be empty.")
 
 
-def _is_usable_name(name) -> bool:
-    """Names arrive as JSON values from the browser: only non-blank strings are names."""
-    return isinstance(name, str) and bool(name.strip())
+def _is_usable_name(name: str) -> bool:
+    return bool(name.strip())
 
 
 def edit_paragraph_text(paragraphs: list[CorrectedParagraph], first_word: int,

@@ -107,11 +107,6 @@ class LoadAndSaveTests(unittest.TestCase):
             save_corrections(self.run_dir, self.readable, {"A": "Anna", "C": "Bernd"},
                              load_corrected_paragraphs(self.run_dir, self.readable))
 
-    def test_saving_a_speaker_name_that_is_no_text_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "must not be empty"):
-            save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": 7},
-                             load_corrected_paragraphs(self.run_dir, self.readable))
-
     def test_saved_speaker_names_are_trimmed(self):
         save_corrections(self.run_dir, self.readable, {"A": " Anna ", "B": "Bernd"},
                          load_corrected_paragraphs(self.run_dir, self.readable))

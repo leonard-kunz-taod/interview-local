@@ -26,27 +26,27 @@ class PipelineTests(unittest.TestCase):
             else:
                 content = {"asr": {"segments": []},
                     "align": [{"start": 0, "end": 1, "text": "Hallo", "timing": "aligned", "probability": None}],
-                    "diarize": [{"start": 0, "end": 1, "speaker": "s0"}]}[stage]
+                    "diarize": {"exclusive": [{"start": 0, "end": 1, "speaker": "s0"}], "regular": []}}[stage]
                 target.write_text(json.dumps(content))
         with tempfile.TemporaryDirectory() as d:
             source = Path(d)/"test.m4a"
             source.touch()
             with patch("interview_local.pipeline.worker", worker):
-                result = process(source, status=lambda _: None, alignment=True)
+                result = process(source, Path(d)/"output", status=lambda _: None, alignment=True)
         self.assertEqual(calls, ["decode", "asr", "check-access", "align", "diarize"])
         self.assertEqual(result["segments"][0]["speaker"], "A")
         self.assertTrue(all(not p.exists() for p in temp))
         self.assertEqual(result["metadata"]["detected_speakers"], 1)
 
     def test_error_cleanup_and_invalid_input(self):
-        with self.assertRaises(ValueError):
-            process(Path("/missing.wav"))
         with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):
+                process(Path("/missing.wav"), Path(d)/"output")
             p = Path(d)/"broken.wav"
             p.touch()
             with patch("interview_local.pipeline.worker", side_effect=RuntimeError("Broken")):
                 with self.assertRaises(RuntimeError):
-                    process(p, status=lambda _: None)
+                    process(p, Path(d)/"output", status=lambda _: None)
 
 class DecodeFailureTests(unittest.TestCase):
     def test_unreadable_audio_gets_its_own_message(self):
@@ -54,7 +54,7 @@ class DecodeFailureTests(unittest.TestCase):
             fake = Path(d)/"notes.wav"
             fake.write_text("This is not audio.")
             with self.assertRaises(RuntimeError) as raised:
-                worker("decode", fake, Path(d)/"decoded.wav", status=lambda _: None)
+                worker("decode", fake, Path(d)/"decoded.wav", status=lambda _: None, token=None)
         message = str(raised.exception)
         names_audio_cause_without_login_advice = ("could not be read as audio" in message, "401/403" in message)
         self.assertEqual(names_audio_cause_without_login_advice, (True, False))
@@ -83,15 +83,15 @@ def interrupting_status(line):
 
 
 class WorkerTests(unittest.TestCase):
-    def failure_of(self, script, stage="asr", **options):
+    def failure_of(self, script: str, stage: str = "asr", token: str | None = None, offline: bool = False) -> str:
         with scripted_stage(script), self.assertRaises(RuntimeError) as raised:
-            worker(stage, Path("in"), Path("out"), status=lambda _: None, **options)
+            worker(stage, Path("in"), Path("out"), status=lambda _: None, token=token, offline=offline)
         return str(raised.exception)
 
     def test_progress_lines_are_reported_and_other_output_is_not(self):
         reported = []
         with scripted_stage("print('Loading model'); print('noise'); print('Transcribed through 5 seconds')"):
-            worker("asr", Path("in"), Path("out"), status=reported.append)
+            worker("asr", Path("in"), Path("out"), status=reported.append, token=None)
         self.assertEqual(reported, ["Loading model", "Transcribed through 5 seconds"])
 
     def test_token_is_redacted_from_failure_details(self):
@@ -118,13 +118,13 @@ class WorkerTests(unittest.TestCase):
 
     def test_successful_stage_returns_quietly(self):
         with scripted_stage("print('done')"):
-            self.assertIsNone(worker("asr", Path("in"), Path("out"), status=lambda _: None))
+            self.assertIsNone(worker("asr", Path("in"), Path("out"), status=lambda _: None, token=None))
 
     def test_interrupt_stops_the_child_and_propagates(self):
         started = time.monotonic()
         with (scripted_stage("import time; print('Loading', flush=True); time.sleep(60)"),
               self.assertRaises(KeyboardInterrupt)):
-            worker("asr", Path("in"), Path("out"), status=interrupting_status)
+            worker("asr", Path("in"), Path("out"), status=interrupting_status, token=None)
         self.assertLess(time.monotonic() - started, INTERRUPT_SECONDS)
 
 
@@ -142,13 +142,13 @@ class ProcessTests(unittest.TestCase):
 
     def run_process(self, stages=SPEECH_MODELS, **options):
         with patch("interview_local.pipeline.worker", stages):
-            return process(self.audio, status=self.messages.append, output_dir=self.output, **options)
+            return process(self.audio, self.output, status=self.messages.append, **options)
 
     def test_unsupported_format_is_rejected(self):
         flac = self.root / "interview.flac"
         flac.touch()
         with self.assertRaises(ValueError):
-            process(flac)
+            process(flac, self.output)
 
     def test_existing_stage_files_are_never_overwritten(self):
         self.output.mkdir()
