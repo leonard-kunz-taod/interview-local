@@ -7,28 +7,9 @@ import unittest
 from unittest.mock import patch
 
 from interview_local.web.jobs import TranscriptionJob, diarization_token
-from run_fixtures import ScriptedClient
+from run_fixtures import ScriptedClient, speech_models
 
 JOB_TIMEOUT_SECONDS = 10
-ASR_OUTPUT = {"segments": [dict(start=0, end=1, text="Guten Tag", words=[
-    dict(start=0, end=.5, text="Guten", timing="whisper", probability=.9),
-    dict(start=.5, end=1, text="Tag", timing="whisper", probability=.4)])], "language": "de"}
-DIARIZATION_OUTPUT = {"exclusive": [dict(start=0, end=1, speaker="s0")],
-                      "regular": [dict(start=0, end=1, speaker="s0")]}
-
-
-def speech_models(failing_stage=None):
-    """Stand-in for the model worker processes: writes the outputs the real stages produce."""
-    def worker(stage, source, target, *args):
-        if stage == failing_stage:
-            raise RuntimeError(f"Stage '{stage}' failed: model unavailable")
-        if stage == "decode":
-            target.touch()
-        elif stage == "asr":
-            target.write_text(json.dumps(ASR_OUTPUT))
-        elif stage == "diarize":
-            target.write_text(json.dumps(DIARIZATION_OUTPUT))
-    return worker
 
 
 def local_llm():

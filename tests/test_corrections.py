@@ -78,6 +78,45 @@ class LoadAndSaveTests(unittest.TestCase):
                          load_corrected_paragraphs(self.run_dir, self.readable))
         self.assertEqual(json.dumps(self.readable, sort_keys=True), before)
 
+    def test_saving_an_unknown_speaker_is_rejected(self):
+        paragraphs = [CorrectedParagraph(0, 3, "C", "Guten Tag", False, True),
+                      CorrectedParagraph(4, 7, "B", "Danke", False, False)]
+        with self.assertRaisesRegex(ValueError, "Unknown speaker"):
+            save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, paragraphs)
+
+    def test_saving_an_unassigned_paragraph_is_accepted(self):
+        paragraphs = [CorrectedParagraph(0, 3, None, "Guten Tag", False, True),
+                      CorrectedParagraph(4, 7, "B", "Danke", False, False)]
+        save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, paragraphs)
+        self.assertEqual(load_corrected_paragraphs(self.run_dir, self.readable), paragraphs)
+
+    def test_saving_a_paragraph_without_words_is_rejected(self):
+        paragraphs = [CorrectedParagraph(0, 3, "A", "–", True, False),
+                      CorrectedParagraph(4, 7, "B", "Danke", False, False)]
+        with self.assertRaisesRegex(ValueError, "no words"):
+            save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, paragraphs)
+
+    def test_saving_a_reversed_word_range_is_rejected(self):
+        paragraphs = [CorrectedParagraph(0, -1, "A", "Guten", False, False),
+                      CorrectedParagraph(0, 7, "B", "Danke", False, False)]
+        with self.assertRaisesRegex(ValueError, "exactly once in order"):
+            save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, paragraphs)
+
+    def test_saving_names_for_other_speaker_labels_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly"):
+            save_corrections(self.run_dir, self.readable, {"A": "Anna", "C": "Bernd"},
+                             load_corrected_paragraphs(self.run_dir, self.readable))
+
+    def test_saving_a_speaker_name_that_is_no_text_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": 7},
+                             load_corrected_paragraphs(self.run_dir, self.readable))
+
+    def test_saved_speaker_names_are_trimmed(self):
+        save_corrections(self.run_dir, self.readable, {"A": " Anna ", "B": "Bernd"},
+                         load_corrected_paragraphs(self.run_dir, self.readable))
+        self.assertEqual(load_speaker_names(self.run_dir, self.readable), {"A": "Anna", "B": "Bernd"})
+
     def test_saving_writes_only_corrections_json(self):
         save_corrections(self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"},
                          load_corrected_paragraphs(self.run_dir, self.readable))
@@ -125,6 +164,28 @@ class ReassignTests(unittest.TestCase):
     def test_unknown_speaker_is_rejected(self):
         with self.assertRaises(ValueError):
             reassign(self.readable, self.paragraphs, 0, 1, "C")
+
+    def test_selection_ending_before_it_starts_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "ends before it starts"):
+            reassign(self.readable, self.paragraphs, 2, 1, "B")
+
+    def test_selection_outside_the_transcript_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "not part of the transcript"):
+            reassign(self.readable, self.paragraphs, 8, 8, "B")
+
+    def test_selection_of_only_removed_words_is_rejected(self):
+        paragraphs = edit_paragraph_text(self.paragraphs, 4, "Danke.")
+        with self.assertRaisesRegex(ValueError, "no displayed word"):
+            reassign(self.readable, paragraphs, 6, 6, "A")
+
+    def test_selection_at_the_paragraph_end_splits_into_two_paragraphs(self):
+        result = reassign(self.readable, self.paragraphs, 6, 7, "A")
+        self.assertEqual(summary(result)[1:], [(4, 5, "B", "Danke, gut.", False), (6, 7, "A", "Und selbst?", True)])
+
+    def test_reassigned_parts_keep_the_text_edit_mark(self):
+        paragraphs = edit_paragraph_text(self.paragraphs, 4, "Danke, sehr gut. Und selbst?")
+        result = reassign(self.readable, paragraphs, 6, 7, "A")
+        self.assertEqual([p.text_edited for p in result[1:]], [True, True])
 
     def test_boundary_inside_a_display_word_widens_to_the_whole_word(self):
         paragraphs = edit_paragraph_text(self.paragraphs, 0, "Gutentag, wie geht's?")

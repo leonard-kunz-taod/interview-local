@@ -10,6 +10,7 @@ from .word_alignment import DisplayWord, align_text_to_source
 
 CORRECTIONS_FILENAME = "corrections.json"
 CORRECTIONS_SCHEMA_VERSION = 1
+COVERAGE_MESSAGE = "Corrected paragraphs do not cover the source words exactly once in order."
 
 
 @dataclass(frozen=True)
@@ -83,11 +84,15 @@ def _stored_corrections(run_dir: Path, readable: dict) -> dict | None:
     if not path.exists():
         return None
     stored = json.loads(path.read_text(encoding="utf-8"))
-    if stored.get("schema_version") != CORRECTIONS_SCHEMA_VERSION or stored.get("stage") != "corrections":
-        raise ValueError(f"{path} is not a supported corrections file.")
+    _require_supported_format(stored, path)
     if stored.get("readable_sha256") != fingerprint(readable):
         raise ValueError(f"{path} belongs to a different readable transcript; 03_readable.json has changed.")
     return stored
+
+
+def _require_supported_format(stored: dict, path: Path) -> None:
+    if stored.get("schema_version") != CORRECTIONS_SCHEMA_VERSION or stored.get("stage") != "corrections":
+        raise ValueError(f"{path} is not a supported corrections file.")
 
 
 def _paragraph_from_readable(paragraph: dict) -> CorrectedParagraph:
@@ -111,15 +116,24 @@ def validate_coverage(paragraphs: list[CorrectedParagraph], readable: dict) -> N
     word_count = len(readable_source_words(readable))
     cursor = 0
     for paragraph in paragraphs:
-        if paragraph.first_word != cursor or paragraph.last_word < paragraph.first_word:
-            raise ValueError("Corrected paragraphs do not cover the source words exactly once in order.")
-        if paragraph.speaker is not None and paragraph.speaker not in readable["speakers"]:
-            raise ValueError(f"Unknown speaker '{paragraph.speaker}' in corrected paragraphs.")
+        _require_range_starting_at(paragraph, cursor)
+        _require_known_speaker(paragraph, readable["speakers"])
         if not tokens(paragraph.text):
             raise ValueError("A corrected paragraph has no words.")
         cursor = paragraph.last_word + 1
     if cursor != word_count:
-        raise ValueError("Corrected paragraphs do not cover the source words exactly once in order.")
+        raise ValueError(COVERAGE_MESSAGE)
+
+
+def _require_range_starting_at(paragraph: CorrectedParagraph, first_word: int) -> None:
+    if paragraph.first_word != first_word or paragraph.last_word < paragraph.first_word:
+        raise ValueError(COVERAGE_MESSAGE)
+
+
+def _require_known_speaker(paragraph: CorrectedParagraph, speakers: dict[str, str]) -> None:
+    """Allow the speakers of the readable transcript and no speaker (unassigned)."""
+    if paragraph.speaker is not None and paragraph.speaker not in speakers:
+        raise ValueError(f"Unknown speaker '{paragraph.speaker}' in corrected paragraphs.")
 
 
 def validate_speaker_names(names: dict[str, str], readable: dict) -> None:
@@ -130,8 +144,13 @@ def validate_speaker_names(names: dict[str, str], readable: dict) -> None:
     """
     if set(names) != set(readable["speakers"]):
         raise ValueError(f"Speaker names must be given for exactly {sorted(readable['speakers'])}.")
-    if any(not isinstance(name, str) or not name.strip() for name in names.values()):
+    if not all(map(_is_usable_name, names.values())):
         raise ValueError("Speaker names must not be empty.")
+
+
+def _is_usable_name(name) -> bool:
+    """Names arrive as JSON values from the browser: only non-blank strings are names."""
+    return isinstance(name, str) and bool(name.strip())
 
 
 def edit_paragraph_text(paragraphs: list[CorrectedParagraph], first_word: int,
@@ -196,31 +215,28 @@ def reassign_words(paragraphs: list[CorrectedParagraph], readable_words: list[di
     anchors = _anchor_ranges(display_words, paragraph.first_word)
     begin, end = _widen_selection(anchors, first_word, last_word)
     begin, end = _absorb_textless_parts(anchors, paragraph, begin, end)
-    if not any(begin <= low and high <= end for low, high in anchors):
-        raise ValueError("The selection contains no displayed word.")
-    parts = [
-        (paragraph.first_word, begin - 1, paragraph.speaker, paragraph.speaker_edited),
-        (begin, end, speaker, True),
-        (end + 1, paragraph.last_word, paragraph.speaker, paragraph.speaker_edited)]
-    replacement = []
-    for low, high, part_speaker, speaker_edited in parts:
-        if low > high:
-            continue
-        part_text = " ".join(word.text for word, (a, b) in zip(display_words, anchors) if low <= a and b <= high)
-        replacement.append(CorrectedParagraph(first_word=low, last_word=high, speaker=part_speaker, text=part_text,
-                                              text_edited=paragraph.text_edited, speaker_edited=speaker_edited))
+    _require_displayed_word(anchors, begin, end)
+    replacement = [CorrectedParagraph(first_word=low, last_word=high, speaker=part_speaker,
+                                      text=_text_within(display_words, anchors, low, high),
+                                      text_edited=paragraph.text_edited, speaker_edited=speaker_edited)
+                   for low, high, part_speaker, speaker_edited in _split_parts(paragraph, begin, end, speaker)]
     return paragraphs[:position] + replacement + paragraphs[position + 1:]
 
 
 def _position_containing(paragraphs: list[CorrectedParagraph], first_word: int, last_word: int) -> int:
     if last_word < first_word:
         raise ValueError("The selection ends before it starts.")
+    position = _position_of_word(paragraphs, first_word)
+    if last_word > paragraphs[position].last_word:
+        raise ValueError("A selection must lie within one paragraph.")
+    return position
+
+
+def _position_of_word(paragraphs: list[CorrectedParagraph], word_id: int) -> int:
     for position, paragraph in enumerate(paragraphs):
-        if paragraph.first_word <= first_word <= paragraph.last_word:
-            if last_word > paragraph.last_word:
-                raise ValueError("A selection must lie within one paragraph.")
+        if paragraph.first_word <= word_id <= paragraph.last_word:
             return position
-    raise ValueError(f"Word {first_word} is not part of the transcript.")
+    raise ValueError(f"Word {word_id} is not part of the transcript.")
 
 
 def _anchor_ranges(display_words: list[DisplayWord], paragraph_first_word: int) -> list[tuple[int, int]]:
@@ -238,22 +254,47 @@ def _anchor_ranges(display_words: list[DisplayWord], paragraph_first_word: int) 
 
 
 def _widen_selection(anchors: list[tuple[int, int]], first_word: int, last_word: int) -> tuple[int, int]:
-    begin, end = first_word, last_word
+    selection = (first_word, last_word)
     while True:
-        touched = [(low, high) for low, high in anchors if low <= end and high >= begin]
-        widened_begin = min([begin] + [low for low, _ in touched])
-        widened_end = max([end] + [high for _, high in touched])
-        if (widened_begin, widened_end) == (begin, end):
-            return begin, end
-        begin, end = widened_begin, widened_end
+        widened = _cover_touching_anchors(anchors, *selection)
+        if widened == selection:
+            return selection
+        selection = widened
+
+
+def _cover_touching_anchors(anchors: list[tuple[int, int]], begin: int, end: int) -> tuple[int, int]:
+    """Extend the range to every anchor range it touches."""
+    touched = [(low, high) for low, high in anchors if low <= end and high >= begin]
+    lows, highs = zip((begin, end), *touched)
+    return min(lows), max(highs)
 
 
 def _absorb_textless_parts(anchors: list[tuple[int, int]], paragraph: CorrectedParagraph,
                            begin: int, end: int) -> tuple[int, int]:
-    has_text_before = any(high < begin for _, high in anchors)
-    has_text_after = any(low > end for low, _ in anchors)
+    lows, highs = zip(*anchors)
+    has_text_before = min(highs) < begin
+    has_text_after = max(lows) > end
     return (begin if has_text_before else paragraph.first_word,
             end if has_text_after else paragraph.last_word)
+
+
+def _require_displayed_word(anchors: list[tuple[int, int]], begin: int, end: int) -> None:
+    if not any(begin <= low <= high <= end for low, high in anchors):
+        raise ValueError("The selection contains no displayed word.")
+
+
+def _split_parts(paragraph: CorrectedParagraph, begin: int, end: int,
+                 speaker: str) -> list[tuple[int, int, str | None, bool]]:
+    """The non-empty parts before, of and after the reassigned range: (first, last, speaker, speaker_edited)."""
+    parts = [(paragraph.first_word, begin - 1, paragraph.speaker, paragraph.speaker_edited),
+             (begin, end, speaker, True),
+             (end + 1, paragraph.last_word, paragraph.speaker, paragraph.speaker_edited)]
+    return [part for part in parts if part[0] <= part[1]]
+
+
+def _text_within(display_words: list[DisplayWord], anchors: list[tuple[int, int]], low: int, high: int) -> str:
+    """The display words whose anchor range lies within low..high."""
+    return " ".join(word.text for word, (first, last) in zip(display_words, anchors) if low <= first <= last <= high)
 
 
 def save_corrections(run_dir: Path, readable: dict, speakers: dict[str, str],

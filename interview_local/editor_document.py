@@ -62,13 +62,17 @@ def speaker_uncertainty(readable_paragraphs: list[dict], paragraph_words: list[d
     """
     if paragraph.speaker_edited:
         return []
-    reasons = {reason for word in paragraph_words for reason in word["uncertainty_reasons"]
-               if reason in SPEAKER_UNCERTAINTY_REASONS}
+    reasons = _word_speaker_reasons(paragraph_words)
     if paragraph.speaker is None:
         reasons.add("unassigned")
     if _readable_paragraph_containing(readable_paragraphs, paragraph.first_word)["speaker_changed"]:
         reasons.add("speaker_changed_by_llm")
     return sorted(reasons)
+
+
+def _word_speaker_reasons(paragraph_words: list[dict]) -> set[str]:
+    return {reason for word in paragraph_words for reason in word["uncertainty_reasons"]
+            if reason in SPEAKER_UNCERTAINTY_REASONS}
 
 
 def _readable_paragraph_containing(readable_paragraphs: list[dict], word_id: int) -> dict:
@@ -79,17 +83,28 @@ def _readable_paragraph_containing(readable_paragraphs: list[dict], word_id: int
 
 
 def _editor_words(display_words: list[DisplayWord], words: list[dict], paragraph_start: float) -> list[dict]:
-    result = []
+    seek_times = _seek_times(display_words, words, paragraph_start)
+    return [_editor_word(word, words, seek_time) for word, seek_time in zip(display_words, seek_times)]
+
+
+def _seek_times(display_words: list[DisplayWord], words: list[dict], paragraph_start: float) -> list[float]:
+    """Each word's playback position: its first source word's start; for an inserted word the end of the
+    preceding source word, or the paragraph start."""
+    seek_times = []
     previous_end = paragraph_start
     for word in display_words:
-        sources = [words[i] for i in word.source_word_ids]
-        seek_time = sources[0]["start"] if sources else previous_end
-        if sources:
-            previous_end = sources[-1]["end"]
-        result.append(dict(text=word.text, source_word_ids=list(word.source_word_ids), seek_time=seek_time,
-                           change=word.change, original_text=word.original_text,
-                           removed_before=word.removed_before, low_asr_confidence=low_asr_confidence(sources)))
-    return result
+        ids = word.source_word_ids
+        seek_times.append(words[ids[0]]["start"] if ids else previous_end)
+        if ids:
+            previous_end = words[ids[-1]]["end"]
+    return seek_times
+
+
+def _editor_word(word: DisplayWord, words: list[dict], seek_time: float) -> dict:
+    sources = [words[i] for i in word.source_word_ids]
+    return dict(text=word.text, source_word_ids=list(word.source_word_ids), seek_time=seek_time,
+                change=word.change, original_text=word.original_text,
+                removed_before=word.removed_before, low_asr_confidence=low_asr_confidence(sources))
 
 
 def low_asr_confidence(sources: list[dict]) -> bool:

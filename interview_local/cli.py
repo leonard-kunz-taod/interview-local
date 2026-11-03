@@ -63,6 +63,18 @@ def new_output(path):
 
 
 def main():
+    args = argument_parser().parse_args()
+    try:
+        return run_command(args)
+    except KeyboardInterrupt:
+        print("\nProcessing cancelled. Completed stage files remain on disk.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print(f"Error: {exc}\nCompleted earlier stages remain on disk, if any.", file=sys.stderr)
+        return 1
+
+
+def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="German interviews: raw speech, speaker attribution and readable local-LLM drafts.")
     parser.add_argument("audio", nargs="?", type=Path)
     parser.add_argument("--output", type=Path, help="New, empty output directory")
@@ -86,102 +98,188 @@ def main():
     modes.add_argument("--review", type=Path, help="Separately compare a readable JSON against its embedded source")
     modes.add_argument("--raw-only", action="store_true", help="Speech-to-text only; no diarization, LLM or HF account")
     parser.add_argument("--no-llm", action="store_true", help="Stop after the preserved speaker transcript")
-    args = parser.parse_args()
-    try:
-        if args.web:
-            from .web.server import serve
-            serve(args.runs_dir.expanduser().resolve())
-            return 0
-        if args.audio and (args.rename or args.enhance or args.review):
-            raise ValueError("Supply audio or a saved-stage command, not both.")
-        if args.offline and (args.prepare or args.prepare_llm):
-            raise ValueError("Preparation downloads models; do not combine it with --offline.")
-        if args.doctor:
-            doctor()
-            return 0
-        if args.gui:
-            try:
-                from .gui import launch
-                launch()
-                return 0
-            except ImportError:
-                print("Tk is not installed. Falling back to the terminal dialog.")
-        from .pipeline import process, prepare
-        from .llm import OllamaClient, enhance, review
-        if args.prepare:
-            prepare(token=get_token(), alignment=args.alignment)
-        if args.prepare_llm:
-            OllamaClient().prepare()
-        if args.prepare or args.prepare_llm:
-            print("Preparation complete.")
-            return 0
-        if args.review:
-            edited = json.loads(args.review.read_text(encoding="utf-8"))
-            output = new_output(args.output)
-            checked = review(edited)
-            save_readable(checked, output)
-            print(readable_text(checked))
-            print(f"Review saved to {output}. Source and readable draft were not overwritten.")
-            return 0
-        if args.enhance:
-            source = json.loads(args.enhance.read_text(encoding="utf-8"))
-            if "words" not in source or "speakers" not in source:
-                raise ValueError("Enhancement requires a stage-2 speaker transcript JSON.")
-            output = new_output(args.output)
-            edited = enhance(source)
-            save_readable(edited, output)
-            print(readable_text(edited))
-            print(f"Readable TXT/Markdown and audit JSON saved to {output}")
-            return 0
-        interactive = not args.audio and not args.rename
-        if args.rename:
-            result = json.loads(args.rename.read_text(encoding="utf-8"))
-            if "speakers" not in result or "segments" not in result:
-                raise ValueError("Renaming requires a speaker transcript JSON.")
-        else:
-            if not args.audio:
-                print("Interview Local — German / two speakers / local processing only")
-                print("Enter a path or drag a WAV, MP3 or M4A file into the terminal.")
-                raw = input("Audio file: ").strip()
-                if os.name == "nt":
-                    args.audio = Path(raw.strip('"'))
-                else:
-                    import shlex
-                    paths = shlex.split(raw)
-                    args.audio = Path(paths[0]) if len(paths) == 1 else Path(raw)
-            args.audio = args.audio.expanduser()
-            if not args.audio.is_file():
-                raise ValueError("Audio file not found. Enter its full path.")
-            if not args.no_llm and not args.raw_only:
-                OllamaClient().ready()
-            output = new_output(args.output)
-            token = None if args.offline or args.raw_only else get_token()
-            result = process(args.audio, token=token, offline=args.offline, alignment=args.alignment,
-                             output_dir=output, raw_only=args.raw_only)
-            if args.raw_only:
-                print((output / "01_raw.txt").read_text(encoding="utf-8"))
-                print(f"Raw transcript saved to {output}")
-                return 0
-        if interactive or args.rename:
-            args.name_a = input("Name for Speaker A [Speaker A]: ").strip() or args.name_a
-            args.name_b = input("Name for Speaker B [Speaker B]: ").strip() or args.name_b
-        result["speakers"].update(A=args.name_a, B=args.name_b)
-        if args.rename:
-            output = new_output(args.output)
-        save_speakers(result, output)
-        export(result, output)  # Legacy stage-2 filenames remain available.
-        if args.rename or args.no_llm:
-            print(render(result))
-        else:
-            edited = enhance(result)
-            save_readable(edited, output)
-            print(readable_text(edited))
-            print("For the separate comparison pass, run --review on 03_readable.json.")
-        print(f"Completed stages saved to {output}")
+    return parser
+
+
+def run_command(args: argparse.Namespace) -> int:
+    if args.web:
+        return serve_web(args.runs_dir)
+    reject_audio_with_saved_stage(args)
+    reject_offline_preparation(args)
+    if args.doctor:
+        doctor()
         return 0
-    except KeyboardInterrupt:
-        print("\nProcessing cancelled. Completed stage files remain on disk.", file=sys.stderr)
-        return 130
-    except Exception as exc:
-        print(f"Error: {exc}\nCompleted earlier stages remain on disk, if any.", file=sys.stderr)
-        return 1
+    if args.gui:
+        return launch_gui(args)
+    return run_terminal_command(args)
+
+
+def serve_web(runs_dir: Path) -> int:
+    from .web.server import serve
+    serve(runs_dir.expanduser().resolve())
+    return 0
+
+
+def reject_audio_with_saved_stage(args: argparse.Namespace) -> None:
+    saved_stage_given = any((args.rename, args.enhance, args.review))
+    if args.audio and saved_stage_given:
+        raise ValueError("Supply audio or a saved-stage command, not both.")
+
+
+def reject_offline_preparation(args: argparse.Namespace) -> None:
+    preparation_requested = args.prepare or args.prepare_llm
+    if args.offline and preparation_requested:
+        raise ValueError("Preparation downloads models; do not combine it with --offline.")
+
+
+def launch_gui(args: argparse.Namespace) -> int:
+    """Open the Tk window; without Tk, continue in the terminal."""
+    try:
+        from .gui import launch
+    except ImportError:
+        print("Tk is not installed. Falling back to the terminal dialog.")
+        return run_terminal_command(args)
+    launch()
+    return 0
+
+
+def run_terminal_command(args: argparse.Namespace) -> int:
+    if args.prepare or args.prepare_llm:
+        return prepare_models(args)
+    if args.review:
+        return review_saved_draft(args)
+    return run_transcript_command(args)
+
+
+def run_transcript_command(args: argparse.Namespace) -> int:
+    if args.enhance:
+        return enhance_saved_transcript(args)
+    if args.rename:
+        return rename_saved_speakers(args)
+    return transcribe_audio(args)
+
+
+def prepare_models(args: argparse.Namespace) -> int:
+    from .llm import OllamaClient
+    from .pipeline import prepare
+    if args.prepare:
+        prepare(token=get_token(), alignment=args.alignment)
+    if args.prepare_llm:
+        OllamaClient().prepare()
+    print("Preparation complete.")
+    return 0
+
+
+def review_saved_draft(args: argparse.Namespace) -> int:
+    from .llm import review
+    edited = json.loads(args.review.read_text(encoding="utf-8"))
+    output = new_output(args.output)
+    checked = review(edited)
+    save_readable(checked, output)
+    print(readable_text(checked))
+    print(f"Review saved to {output}. Source and readable draft were not overwritten.")
+    return 0
+
+
+def enhance_saved_transcript(args: argparse.Namespace) -> int:
+    from .llm import enhance
+    source = json.loads(args.enhance.read_text(encoding="utf-8"))
+    if "words" not in source or "speakers" not in source:
+        raise ValueError("Enhancement requires a stage-2 speaker transcript JSON.")
+    output = new_output(args.output)
+    edited = enhance(source)
+    save_readable(edited, output)
+    print(readable_text(edited))
+    print(f"Readable TXT/Markdown and audit JSON saved to {output}")
+    return 0
+
+
+def rename_saved_speakers(args: argparse.Namespace) -> int:
+    result = json.loads(args.rename.read_text(encoding="utf-8"))
+    if "speakers" not in result or "segments" not in result:
+        raise ValueError("Renaming requires a speaker transcript JSON.")
+    ask_speaker_names(args)
+    output = new_output(args.output)
+    save_named_speakers(result, args, output)
+    print(render(result))
+    print(f"Completed stages saved to {output}")
+    return 0
+
+
+def transcribe_audio(args: argparse.Namespace) -> int:
+    audio = existing_audio(args.audio or ask_audio_path())
+    if args.raw_only:
+        return transcribe_raw_only(audio, args)
+    return transcribe_speakers(audio, args)
+
+
+def ask_audio_path() -> Path:
+    print("Interview Local — German / two speakers / local processing only")
+    print("Enter a path or drag a WAV, MP3 or M4A file into the terminal.")
+    raw = input("Audio file: ").strip()
+    if os.name == "nt":
+        return Path(raw.strip('"'))
+    import shlex
+    paths = shlex.split(raw)
+    return Path(paths[0]) if len(paths) == 1 else Path(raw)
+
+
+def existing_audio(path: Path) -> Path:
+    path = path.expanduser()
+    if not path.is_file():
+        raise ValueError("Audio file not found. Enter its full path.")
+    return path
+
+
+def transcribe_raw_only(audio: Path, args: argparse.Namespace) -> int:
+    from .pipeline import process
+    output = new_output(args.output)
+    process(audio, token=None, offline=args.offline, alignment=args.alignment, output_dir=output, raw_only=True)
+    print((output / "01_raw.txt").read_text(encoding="utf-8"))
+    print(f"Raw transcript saved to {output}")
+    return 0
+
+
+def transcribe_speakers(audio: Path, args: argparse.Namespace) -> int:
+    """Transcribe with speaker attribution; names are asked when the audio path was asked as well."""
+    from .llm import OllamaClient
+    from .pipeline import process
+    if not args.no_llm:
+        OllamaClient().ready()
+    output = new_output(args.output)
+    token = None if args.offline else get_token()
+    result = process(audio, token=token, offline=args.offline, alignment=args.alignment,
+                     output_dir=output, raw_only=False)
+    if args.audio is None:
+        ask_speaker_names(args)
+    save_named_speakers(result, args, output)
+    finish_transcript(result, args, output)
+    return 0
+
+
+def ask_speaker_names(args: argparse.Namespace) -> None:
+    args.name_a = input("Name for Speaker A [Speaker A]: ").strip() or args.name_a
+    args.name_b = input("Name for Speaker B [Speaker B]: ").strip() or args.name_b
+
+
+def save_named_speakers(result: dict, args: argparse.Namespace, output: Path) -> None:
+    result["speakers"].update(A=args.name_a, B=args.name_b)
+    save_speakers(result, output)
+    export(result, output)  # Legacy stage-2 filenames remain available.
+
+
+def finish_transcript(result: dict, args: argparse.Namespace, output: Path) -> None:
+    """Print the speaker transcript with --no-llm, else draft the readable transcript."""
+    if args.no_llm:
+        print(render(result))
+    else:
+        draft_readable(result, output)
+    print(f"Completed stages saved to {output}")
+
+
+def draft_readable(result: dict, output: Path) -> None:
+    from .llm import enhance
+    edited = enhance(result)
+    save_readable(edited, output)
+    print(readable_text(edited))
+    print("For the separate comparison pass, run --review on 03_readable.json.")

@@ -44,3 +44,18 @@ class AlignmentTests(unittest.TestCase):
                 result = aligner.align(audio,{"segments":[segment]})
             self.assertEqual(result[0]["start"],1.)
             self.assertEqual(result[1]["timing"],"estimated")
+
+    def test_segment_without_audio_samples_falls_back_to_whisper_words(self):
+        import numpy as np
+        import soundfile as sf
+        aligner = GermanWhisperXAligner.__new__(GermanWhisperXAligner)
+        aligner.model = None
+        aligner.metadata = {}
+        segment = {"start": 1., "end": 1., "text": "Ja",
+                   "words": [{"start": 1., "end": 1., "text": "Ja", "timing": "whisper"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory)/"test.wav"
+            sf.write(audio, np.zeros(48000), 16000)
+            with patch.dict(sys.modules, {"whisperx.alignment": SimpleNamespace(align=None)}):
+                result = aligner.align(audio, {"segments": [segment]})
+        self.assertEqual([(w["text"], w["timing"]) for w in result], [("Ja", "whisper_fallback")])

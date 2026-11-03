@@ -1,6 +1,9 @@
 """Loopback-only HTTP server for uploading recordings and correcting transcripts."""
 from __future__ import annotations
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -40,8 +43,11 @@ class HttpError(Exception):
         self.status = status
 
 
-class RangeNotSatisfiable(ValueError):
+class RangeNotSatisfiable(HttpError, ValueError):
     """The requested byte range lies outside the file."""
+
+    def __init__(self, message: str):
+        super().__init__(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, message)
 
 
 def serve(runs_root: Path) -> None:
@@ -106,11 +112,19 @@ def parse_byte_range(header: str, size: int) -> tuple[int, int]:
         raise ValueError(f"Unsupported Range header: {header}")
     first, last = match.groups()
     if not first:
-        suffix_length = int(last)
-        if suffix_length == 0 or size == 0:
-            raise RangeNotSatisfiable(f"Range {header} is not satisfiable.")
-        return max(0, size - suffix_length), size - 1
-    start = int(first)
+        return _suffix_range(header, int(last), size)
+    return _range_from(header, int(first), last, size)
+
+
+def _suffix_range(header: str, suffix_length: int, size: int) -> tuple[int, int]:
+    """The last suffix_length bytes (``bytes=-500``)."""
+    if suffix_length == 0 or size == 0:
+        raise RangeNotSatisfiable(f"Range {header} is not satisfiable.")
+    return max(0, size - suffix_length), size - 1
+
+
+def _range_from(header: str, start: int, last: str, size: int) -> tuple[int, int]:
+    """The bytes from start through last, or through the end of the file without last (``bytes=500-``)."""
     end = min(int(last), size - 1) if last else size - 1
     if start >= size or end < start:
         raise RangeNotSatisfiable(f"Range {header} is not satisfiable.")
@@ -137,19 +151,20 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         try:
-            self._require_loopback_host()
-            if method != "GET":
-                self._require_preflighted_write()
-            self._route(method, self._path_segments())
+            self._handle(method)
         except HttpError as exc:
             self._send_json(exc.status, {"error": str(exc)})
-        except RangeNotSatisfiable as exc:
-            self._send_json(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, {"error": str(exc)})
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:
             traceback.print_exc()
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+
+    def _handle(self, method: str) -> None:
+        self._require_loopback_host()
+        if method != "GET":
+            self._require_preflighted_write()
+        self._route(method, self._path_segments())
 
     def _require_loopback_host(self) -> None:
         port = self.server.server_address[1]
@@ -171,31 +186,23 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
                 urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
 
     def _route(self, method: str, segments: list[str]) -> None:
-        match (method, segments):
-            case ("GET", []):
-                self._send_static("index.html")
-            case ("GET", ["static", name]):
-                self._send_static(name)
-            case ("GET", ["api", "runs"]):
-                self._send_json(HTTPStatus.OK, {"runs": list_runs(self.state.runs_root)})
-            case ("POST", ["api", "runs"]):
-                self._start_upload()
-            case ("GET", ["api", "jobs", job_id]):
-                self._send_job(job_id)
-            case ("GET", ["api", "runs", run_id, "document"]):
-                self._send_json(HTTPStatus.OK, self._document(run_id))
-            case ("GET", ["api", "runs", run_id, "audio"]):
-                self._send_audio(stored_audio(self._run_dir(run_id)))
-            case ("GET", ["api", "runs", run_id, export]) if export in EXPORT_FORMATS:
-                self._send_export(run_id, export)
-            case ("PUT", ["api", "runs", run_id, "paragraphs", first_word, "text"]):
-                self._edit_text(run_id, first_word)
-            case ("POST", ["api", "runs", run_id, "reassign"]):
-                self._reassign(run_id)
-            case ("PUT", ["api", "runs", run_id, "speakers"]):
-                self._rename_speakers(run_id)
-            case _:
-                raise HttpError(HTTPStatus.NOT_FOUND, f"No route for {method} {self.path}.")
+        for route in ROUTES:
+            if route.matches(method, segments):
+                route.handle(self, segments)
+                return
+        raise HttpError(HTTPStatus.NOT_FOUND, f"No route for {method} {self.path}.")
+
+    def _send_index(self) -> None:
+        self._send_static("index.html")
+
+    def _send_runs(self) -> None:
+        self._send_json(HTTPStatus.OK, {"runs": list_runs(self.state.runs_root)})
+
+    def _send_document(self, run_id: str) -> None:
+        self._send_json(HTTPStatus.OK, self._document(run_id))
+
+    def _send_run_audio(self, run_id: str) -> None:
+        self._send_audio(stored_audio(self._run_dir(run_id)))
 
     def _send_static(self, name: str) -> None:
         if name not in STATIC_CONTENT_TYPES:
@@ -354,6 +361,43 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+@dataclass(frozen=True)
+class Route:
+    """A request method and path pattern; PARAMETER segments are passed to the action in order."""
+    method: str
+    pattern: tuple[str | object, ...]
+    action: Callable[..., None]
+
+    def matches(self, method: str, segments: list[str]) -> bool:
+        return method == self.method and _segments_match(self.pattern, segments)
+
+    def handle(self, handler: EditorRequestHandler, segments: list[str]) -> None:
+        parameters = [segment for expected, segment in zip(self.pattern, segments) if expected is PARAMETER]
+        self.action(handler, *parameters)
+
+
+def _segments_match(pattern: tuple[str | object, ...], segments: list[str]) -> bool:
+    return len(pattern) == len(segments) and all(
+        expected is PARAMETER or expected == segment for expected, segment in zip(pattern, segments))
+
+
+PARAMETER = object()
+ROUTES = (
+    Route("GET", (), EditorRequestHandler._send_index),
+    Route("GET", ("static", PARAMETER), EditorRequestHandler._send_static),
+    Route("GET", ("api", "runs"), EditorRequestHandler._send_runs),
+    Route("POST", ("api", "runs"), EditorRequestHandler._start_upload),
+    Route("GET", ("api", "jobs", PARAMETER), EditorRequestHandler._send_job),
+    Route("GET", ("api", "runs", PARAMETER, "document"), EditorRequestHandler._send_document),
+    Route("GET", ("api", "runs", PARAMETER, "audio"), EditorRequestHandler._send_run_audio),
+    *(Route("GET", ("api", "runs", PARAMETER, export), partial(EditorRequestHandler._send_export, export=export))
+      for export in EXPORT_FORMATS),
+    Route("PUT", ("api", "runs", PARAMETER, "paragraphs", PARAMETER, "text"), EditorRequestHandler._edit_text),
+    Route("POST", ("api", "runs", PARAMETER, "reassign"), EditorRequestHandler._reassign),
+    Route("PUT", ("api", "runs", PARAMETER, "speakers"), EditorRequestHandler._rename_speakers),
+)
+
+
 def audio_extension(filename: str) -> str:
     """Return the lower-case audio extension of an upload's filename.
 
@@ -379,12 +423,17 @@ def resolve_run_dir(runs_root: Path, run_id: str) -> Path:
     Raises:
         HttpError: If the id is not a single existing directory name under runs_root.
     """
-    if run_id in {"", ".", ".."} or "/" in run_id or "\\" in run_id:
+    if not _is_directory_name(run_id):
         raise HttpError(HTTPStatus.NOT_FOUND, f"Unknown run {run_id}.")
     run_dir = (runs_root / run_id).resolve()
     if run_dir.parent != runs_root.resolve() or not run_dir.is_dir():
         raise HttpError(HTTPStatus.NOT_FOUND, f"Unknown run {run_id}.")
     return run_dir
+
+
+def _is_directory_name(run_id: str) -> bool:
+    """Whether run_id names one directory entry rather than a path or a special entry."""
+    return run_id not in {"", ".", ".."} and "/" not in run_id and "\\" not in run_id
 
 
 def stored_audio(run_dir: Path) -> Path:
@@ -394,7 +443,7 @@ def stored_audio(run_dir: Path) -> Path:
         HttpError: If the run directory holds no stored audio copy.
     """
     candidates = [run_dir / f"{STORED_AUDIO_STEM}{extension}" for extension in AUDIO_CONTENT_TYPES]
-    existing = [path for path in candidates if path.is_file()]
+    existing = list(filter(Path.is_file, candidates))
     if len(existing) != 1:
         raise HttpError(HTTPStatus.CONFLICT, "This run has no stored audio copy and cannot be opened in the "
                         "editor. Only runs started from the web UI can be edited.")
@@ -415,8 +464,12 @@ def load_readable(run_dir: Path) -> dict:
 
 def list_runs(runs_root: Path) -> list[dict]:
     """List runs with a readable transcript, newest first."""
-    runs = [path for path in runs_root.iterdir() if path.is_dir() and (path / READABLE_FILENAME).is_file()]
-    return [{"run_id": path.name} for path in sorted(runs, key=lambda path: path.name, reverse=True)]
+    runs = sorted(filter(_has_readable_transcript, runs_root.iterdir()), key=lambda path: path.name, reverse=True)
+    return [{"run_id": path.name} for path in runs]
+
+
+def _has_readable_transcript(path: Path) -> bool:
+    return path.is_dir() and (path / READABLE_FILENAME).is_file()
 
 
 def static_file(name: str) -> bytes:

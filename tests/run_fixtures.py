@@ -1,7 +1,26 @@
 """Readable (03) transcripts built through the real merge/enhance code with a scripted local LLM."""
+import json
+
 from interview_local.core import Turn, Word, merge
 from interview_local.corrections import readable_source_words, reassign_words
 from interview_local.llm import enhance
+
+ASR_OUTPUT = {"segments": [dict(start=0, end=1, text="Guten Tag", words=[
+    dict(start=0, end=.5, text="Guten", timing="whisper", probability=.9),
+    dict(start=.5, end=1, text="Tag", timing="whisper", probability=.4)])], "language": "de"}
+DIARIZATION_OUTPUT = {"exclusive": [dict(start=0, end=1, speaker="s0")],
+                      "regular": [dict(start=0, end=1, speaker="s0")]}
+STAGE_OUTPUTS = {"decode": "", "asr": json.dumps(ASR_OUTPUT), "diarize": json.dumps(DIARIZATION_OUTPUT)}
+
+
+def speech_models(failing_stage=None):
+    """Stand-in for the model worker processes: writes the outputs the real stages produce."""
+    def worker(stage, source, target, *args):
+        if stage == failing_stage:
+            raise RuntimeError(f"Stage '{stage}' failed: model unavailable")
+        if stage in STAGE_OUTPUTS:
+            target.write_text(STAGE_OUTPUTS[stage])
+    return worker
 
 
 class ScriptedClient:

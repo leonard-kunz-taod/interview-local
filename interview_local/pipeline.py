@@ -1,4 +1,7 @@
 from __future__ import annotations
+from collections import Counter, deque
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -13,116 +16,194 @@ STEPS = {"decode": "1/5 Decode audio (WAV, MP3 or M4A)",
          "diarize": "4/5 Identify two speakers (CPU / Float32)",
          "check-access": "Checking local community-1 model / Hugging Face access if needed"}
 
+OFFLINE_ENVIRONMENT = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+TELEMETRY_OFF_ENVIRONMENT = {"HF_HUB_DISABLE_TELEMETRY": "1", "PYANNOTE_METRICS_ENABLED": "0"}
+PROGRESS_PREFIXES = ("Transcribed", "Aligned", "Loading", "Stage ", "Peak process RAM")
+FAILURE_DETAIL_LINES = 18
+STOP_TIMEOUT_SECONDS = 10
+SUPPORTED_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a"}
+STAGE_FILENAMES = ("01_raw.json", "01_raw.txt", "02_speakers.json", "02_speakers.txt")
+DECODED_AUDIO = "original.wav"
+REQUESTED_SPEAKERS = 2
+
+
 def worker(stage, source, target, status=print, token=None, offline=False):
-    env = os.environ.copy()
-    if token:
-        env["HF_TOKEN"] = token
-    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    env["PYANNOTE_METRICS_ENABLED"] = "0"
+    env = worker_environment(token)
     if offline:
-        env["HF_HUB_OFFLINE"] = "1"
-        env["TRANSFORMERS_OFFLINE"] = "1"
-    tail = []
+        env.update(OFFLINE_ENVIRONMENT)
     with subprocess.Popen([sys.executable, "-m", "interview_local.worker", stage, str(source), str(target)],
                           env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding="utf-8", errors="replace") as proc:
         try:
-            for line in proc.stdout:
-                line = line.strip()
-                if env.get("HF_TOKEN"):
-                    line = line.replace(env["HF_TOKEN"], "[Token redacted]")
-                tail.append(line)
-                tail = tail[-18:]
-                if line.startswith(("Transcribed", "Aligned", "Loading",
-                                    "Stage ", "Peak process RAM")):
-                    status(line)
+            tail = relay_output(proc.stdout, env.get("HF_TOKEN"), status)
             code = proc.wait()
         except BaseException:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+            stop(proc)
             raise
     if code:
-        detail = "\n".join(tail)
-        if stage == "decode":
-            raise RuntimeError("The file could not be read as audio. Check that it plays in an audio player "
-                               "and is not DRM-protected, or try a WAV file.\n"
-                               f"Technical details:\n{detail}")
-        raise RuntimeError(f"Stage '{stage}' failed.\n"
-            "For 401/403: renew your HF login/read token and accept the community-1 conditions.\n"
-            "For download errors, check your connection or model cache. If memory is low, close other apps.\n"
-            f"Technical details:\n{detail}")
+        raise stage_failure(stage, "\n".join(tail))
+
+
+def worker_environment(token: str | None) -> dict[str, str]:
+    """The model worker's environment: this process's, with the HF token if given and telemetry off."""
+    env = os.environ.copy()
+    if token:
+        env["HF_TOKEN"] = token
+    env.update(TELEMETRY_OFF_ENVIRONMENT)
+    return env
+
+
+def relay_output(lines: Iterable[str], secret: str | None, status: Callable[[str], None]) -> list[str]:
+    """Pass progress lines on to status and return the last output lines, with the secret redacted."""
+    tail = deque(maxlen=FAILURE_DETAIL_LINES)
+    for line in lines:
+        line = redact(line.strip(), secret)
+        tail.append(line)
+        if line.startswith(PROGRESS_PREFIXES):
+            status(line)
+    return list(tail)
+
+
+def redact(line: str, secret: str | None) -> str:
+    return line.replace(secret, "[Token redacted]") if secret else line
+
+
+def stop(proc: subprocess.Popen) -> None:
+    """Terminate the worker; kill it if it does not exit in time."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def stage_failure(stage: str, detail: str) -> RuntimeError:
+    if stage == "decode":
+        return RuntimeError("The file could not be read as audio. Check that it plays in an audio player "
+                            "and is not DRM-protected, or try a WAV file.\n"
+                            f"Technical details:\n{detail}")
+    return RuntimeError(f"Stage '{stage}' failed.\n"
+        "For 401/403: renew your HF login/read token and accept the community-1 conditions.\n"
+        "For download errors, check your connection or model cache. If memory is low, close other apps.\n"
+        f"Technical details:\n{detail}")
+
+
+@dataclass(frozen=True)
+class StageRun:
+    """One processing run: its temporary work directory, optional artifact directory and worker settings."""
+    work: Path
+    output_dir: Path | None
+    status: Callable[[str], None]
+    token: str | None
+    offline: bool
+
+    def execute(self, stage: str, source: Path, target: Path) -> None:
+        self.status(STEPS[stage])
+        worker(stage, source, target, self.status, self.token, self.offline)
+
+    def read_json(self, name: str):
+        return json.loads((self.work / name).read_text(encoding="utf-8"))
+
 
 def process(source: Path, status=print, token=None, offline=False, alignment=False,
             output_dir: Path | None = None, raw_only=False) -> dict:
-    from .artifacts import save_raw, save_speakers
+    source = audio_source(source)
+    if output_dir is not None:
+        output_dir = claim_output_dir(Path(output_dir))
+    with tempfile.TemporaryDirectory(prefix="interview-local-") as directory:
+        run = StageRun(Path(directory), output_dir, status, token, offline)
+        raw = recognize_speech(run, source)
+        if raw_only:
+            return raw
+        run.execute("check-access", source, run.work / "access")
+        words = align_words(run) if alignment else whisper_words(run, raw)
+        return attribute_speakers(run, raw, words, alignment)
+
+
+def audio_source(source: Path) -> Path:
     source = source.expanduser().resolve()
     if not source.is_file():
         raise ValueError("The audio file was not found.")
-    if source.suffix.lower() not in {".wav", ".mp3", ".m4a"}:
+    if source.suffix.lower() not in SUPPORTED_AUDIO_SUFFIXES:
         raise ValueError("Please select a WAV, MP3 or M4A file.")
-    if output_dir is not None:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if any((output_dir / name).exists() for name in
-               ("01_raw.json", "01_raw.txt", "02_speakers.json", "02_speakers.txt")):
-            raise ValueError("Completed stage files already exist. Select a new output directory.")
-    with tempfile.TemporaryDirectory(prefix="interview-local-") as directory:
-        work = Path(directory)
-        audio = work / "original.wav"
-        for stage, src, dst in [("decode", source, audio), ("asr", audio, work / "asr.json")]:
-            status(STEPS[stage])
-            worker(stage, src, dst, status, token, offline)
-        transcript = json.loads((work / "asr.json").read_text(encoding="utf-8"))
-        raw = dict(schema_version=2, stage="raw", source=source.name, **transcript)
-        if output_dir is not None:
-            save_raw(raw, output_dir)
-            status(f"Original speech recognition output saved: {output_dir / '01_raw.txt'}")
-        if raw_only:
-            return raw
-        status(STEPS["check-access"])
-        worker("check-access", source, work / "access", status, token, offline)
-        if alignment:
-            status(STEPS["align"])
-            worker("align", audio, work / "words.json", status, token, offline)
-            raw_words = json.loads((work / "words.json").read_text(encoding="utf-8"))
-        else:
-            status("3/5 Use Whisper word timestamps (no additional alignment)")
-            from .backends import fallback_words
-            raw_words = [dict(w) for segment in transcript["segments"] for w in fallback_words(segment)]
-            for word in raw_words:
-                if word["timing"] == "whisper_fallback":
-                    word["timing"] = "whisper"
-        status(STEPS["diarize"])
-        worker("diarize", audio, work / "turns.json", status, token, offline)
-        words = [Word(**w) for w in raw_words]
-        diarization = json.loads((work / "turns.json").read_text(encoding="utf-8"))
-        # Legacy fixtures and earlier cached outputs contain exclusive turns only.
-        if isinstance(diarization, list):
-            turns = [Turn(**t) for t in diarization]
-            regular = None
-        else:
-            turns = [Turn(**t) for t in diarization["exclusive"]]
-            regular = [Turn(**t) for t in diarization["regular"]]
-        status("5/5 Merge words and speaker turns, including overlap markers")
-        result = merge(words, turns, regular)
-        result["stage"] = "speakers"
-        result["raw_transcript"] = raw
-        from collections import Counter
-        result["metadata"] = dict(word_timing_counts=dict(Counter(w.timing for w in words)),
-            source=source.name, transcription="faster-whisper/large-v3",
-            diarization="pyannote/speaker-diarization-community-1", alignment=alignment,
-            device="cpu", compute_type="int8 (ASR), float32 (diarization/alignment)",
-            requested_speakers=2, detected_speakers=len(result["speakers"]),
-            warnings=["Automatic transcript: review text and speaker changes before use."])
-        if len(result["speakers"]) != 2:
-            result["metadata"]["warnings"].append("The model did not detect exactly two speakers despite the requested count.")
-        if output_dir is not None:
-            save_speakers(result, output_dir)
-        return result
+    return source
+
+
+def claim_output_dir(output_dir: Path) -> Path:
+    """Create the output directory; refuse one that already holds completed stage files."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if any((output_dir / name).exists() for name in STAGE_FILENAMES):
+        raise ValueError("Completed stage files already exist. Select a new output directory.")
+    return output_dir
+
+
+def recognize_speech(run: StageRun, source: Path) -> dict:
+    """Decode and transcribe the audio; save the raw transcript if the run has an output directory."""
+    from .artifacts import save_raw
+    audio = run.work / DECODED_AUDIO
+    run.execute("decode", source, audio)
+    run.execute("asr", audio, run.work / "asr.json")
+    raw = dict(schema_version=2, stage="raw", source=source.name, **run.read_json("asr.json"))
+    if run.output_dir is not None:
+        save_raw(raw, run.output_dir)
+        run.status(f"Original speech recognition output saved: {run.output_dir / '01_raw.txt'}")
+    return raw
+
+
+def align_words(run: StageRun) -> list[dict]:
+    run.execute("align", run.work / DECODED_AUDIO, run.work / "words.json")
+    return run.read_json("words.json")
+
+
+def whisper_words(run: StageRun, raw: dict) -> list[dict]:
+    """Words with Whisper's own timestamps; segments without words become one estimated word."""
+    run.status("3/5 Use Whisper word timestamps (no additional alignment)")
+    from .backends import fallback_words
+    return [as_whisper_timing(w) for segment in raw["segments"] for w in fallback_words(segment)]
+
+
+def as_whisper_timing(word: dict) -> dict:
+    """Without alignment, Whisper timing is the primary timing, not a fallback."""
+    return dict(word, timing="whisper") if word["timing"] == "whisper_fallback" else dict(word)
+
+
+def attribute_speakers(run: StageRun, raw: dict, raw_words: list[dict], alignment: bool) -> dict:
+    """Diarize, merge words and speaker turns, and save the speaker transcript if the run has an output directory."""
+    from .artifacts import save_speakers
+    run.execute("diarize", run.work / DECODED_AUDIO, run.work / "turns.json")
+    words = [Word(**w) for w in raw_words]
+    turns, regular = diarization_turns(run.read_json("turns.json"))
+    run.status("5/5 Merge words and speaker turns, including overlap markers")
+    result = merge(words, turns, regular)
+    result["stage"] = "speakers"
+    result["raw_transcript"] = raw
+    result["metadata"] = speaker_metadata(words, result["speakers"], raw["source"], alignment)
+    if run.output_dir is not None:
+        save_speakers(result, run.output_dir)
+    return result
+
+
+def diarization_turns(diarization) -> tuple[list[Turn], list[Turn] | None]:
+    """Exclusive and regular turns; legacy fixtures and earlier cached outputs contain exclusive turns only."""
+    if isinstance(diarization, list):
+        return as_turns(diarization), None
+    return as_turns(diarization["exclusive"]), as_turns(diarization["regular"])
+
+
+def as_turns(items: list[dict]) -> list[Turn]:
+    return [Turn(**t) for t in items]
+
+
+def speaker_metadata(words: list[Word], speakers: dict, source_name: str, alignment: bool) -> dict:
+    warnings = ["Automatic transcript: review text and speaker changes before use."]
+    if len(speakers) != REQUESTED_SPEAKERS:
+        warnings.append("The model did not detect exactly two speakers despite the requested count.")
+    return dict(word_timing_counts=dict(Counter(w.timing for w in words)),
+        source=source_name, transcription="faster-whisper/large-v3",
+        diarization="pyannote/speaker-diarization-community-1", alignment=alignment,
+        device="cpu", compute_type="int8 (ASR), float32 (diarization/alignment)",
+        requested_speakers=REQUESTED_SPEAKERS, detected_speakers=len(speakers), warnings=warnings)
 
 def prepare(status=print, token=None, alignment=False):
     stages = ["prepare-diarize", "prepare-asr"]

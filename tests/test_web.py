@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.client import HTTPResponse
 import io
 import json
@@ -51,8 +51,7 @@ def exchange(server, method, path, body=b"", headers=None):
     headers = {"Host": HOST, **(headers or {})}
     if body or method != "GET":
         headers.setdefault("Content-Length", str(len(body)))
-    head = f"{method} {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
-    connection = InMemoryConnection(head.encode("latin-1") + body)
+    connection = InMemoryConnection(request_head(method, path, headers) + body)
     with patch.object(EditorRequestHandler, "log_message"):
         EditorRequestHandler(connection, ("127.0.0.1", 50000), server)
     response = HTTPResponse(ResponseSocket(bytes(connection.response)), method=method)
@@ -60,8 +59,17 @@ def exchange(server, method, path, body=b"", headers=None):
     return response.status, response, response.read()
 
 
+def request_head(method, path, headers):
+    lines = [f"{method} {path} HTTP/1.1"] + [f"{name}: {value}" for name, value in headers.items()]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
 def send_json(server, method, path, value):
     return exchange(server, method, path, json.dumps(value).encode(), {"Content-Type": "application/json"})
+
+
+def stage_file_contents(run_dir):
+    return {p.name: p.read_bytes() for p in run_dir.iterdir() if p.name.startswith(("01_", "02_", "03_"))}
 
 
 class InterruptedServer(FakeServer):
@@ -134,6 +142,16 @@ class StaticFileTests(unittest.TestCase):
             status, response, body = exchange(FakeServer(Path(directory)), "GET", "/")
         self.assertEqual((status, b'accept=".wav,.mp3,.m4a"' in body), (200, True))
 
+    def test_frontend_script_is_served_with_its_content_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, response, _ = exchange(FakeServer(Path(directory)), "GET", "/static/app.js")
+        self.assertEqual((status, response.getheader("Content-Type")), (200, "text/javascript; charset=utf-8"))
+
+    def test_unknown_static_file_is_not_found(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, _, _ = exchange(FakeServer(Path(directory)), "GET", "/static/secret.py")
+        self.assertEqual(status, 404)
+
 
 class RequestGuardTests(unittest.TestCase):
     def setUp(self):
@@ -155,6 +173,17 @@ class RequestGuardTests(unittest.TestCase):
         status, _, _ = exchange(self.server, "PUT", f"/api/runs/{RUN_ID}/speakers", b'{"A": "x"}',
                                 {"Content-Type": "text/plain"})
         self.assertEqual(status, 415)
+
+    def test_unknown_route_is_not_found(self):
+        for method, path in (("GET", "/api/unknown"), ("POST", "/"), ("PUT", f"/api/runs/{RUN_ID}/document"),
+                             ("GET", f"/api/runs/{RUN_ID}/export.pdf"), ("GET", "/api/runs/x/y/z/document")):
+            with self.subTest(method=method, path=path):
+                status, _, _ = exchange(self.server, method, path, headers={"Content-Type": "application/json"})
+                self.assertEqual(status, 404)
+
+    def test_unknown_run_is_not_found(self):
+        status, _, _ = exchange(self.server, "GET", "/api/runs/2020-01-01_00-00-00-000000/document")
+        self.assertEqual(status, 404)
 
     def test_path_traversal_run_id_is_rejected(self):
         for run_id in ("..", "%2E%2E", "..%2Fetc"):
@@ -266,10 +295,9 @@ class EditorApiTests(unittest.TestCase):
         self.assertEqual([p["speaker_name"] for p in self.document()["paragraphs"]], ["Bernd", "Anna"])
 
     def test_stage_files_stay_unchanged_after_corrections(self):
-        stage_files = sorted(p for p in self.run_dir.iterdir() if p.name.startswith(("01_", "02_", "03_")))
-        before = [p.read_bytes() for p in stage_files]
+        before = stage_file_contents(self.run_dir)
         send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/paragraphs/4/text", {"text": "Danke."})
-        self.assertEqual([p.read_bytes() for p in stage_files], before)
+        self.assertEqual(stage_file_contents(self.run_dir), before)
 
     def test_export_is_a_corrected_download(self):
         send_json(self.server, "PUT", f"/api/runs/{RUN_ID}/paragraphs/4/text", {"text": "Danke, sehr gut."})
@@ -286,6 +314,33 @@ class EditorApiTests(unittest.TestCase):
                                           headers={"Range": "bytes=10-19"})
         partial = (status, body, response.getheader("Content-Range"), response.getheader("Content-Type"))
         self.assertEqual(partial, (206, AUDIO_BYTES[10:20], f"bytes 10-19/{len(AUDIO_BYTES)}", "audio/wav"))
+
+    def test_audio_range_beyond_the_file_is_not_satisfiable(self):
+        status, _, _ = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/audio",
+                                headers={"Range": f"bytes={len(AUDIO_BYTES)}-"})
+        self.assertEqual(status, 416)
+
+    def test_run_with_two_stored_audio_copies_cannot_be_opened(self):
+        (self.run_dir / "source.mp3").write_bytes(AUDIO_BYTES)
+        status, _, _ = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/document")
+        self.assertEqual(status, 409)
+
+    def test_broken_readable_transcript_is_an_internal_error(self):
+        (self.run_dir / "03_readable.json").write_text("{}", encoding="utf-8")
+        with redirect_stderr(io.StringIO()):
+            status, _, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/document")
+        self.assertEqual((status, json.loads(body)["error"]), (500, "KeyError: 'paragraphs'"))
+
+    def test_runs_are_listed_newest_first(self):
+        later = self.runs_root / "2026-02-01_10-00-00-000000"
+        save_readable(readable_transcript(TWO_PARAGRAPHS), later)
+        _, _, body = exchange(self.server, "GET", "/api/runs")
+        self.assertEqual(json.loads(body), {"runs": [{"run_id": later.name}, {"run_id": RUN_ID}]})
+
+    def test_reassignment_without_integer_word_ids_is_rejected(self):
+        status, _, _ = send_json(self.server, "POST", f"/api/runs/{RUN_ID}/reassign",
+                                 {"first_word": "5", "last_word": 6, "speaker": "A"})
+        self.assertEqual(status, 400)
 
     def test_audio_without_range_returns_the_whole_file(self):
         status, _, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/audio")
