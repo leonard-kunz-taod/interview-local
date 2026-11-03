@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-# Set before library imports; disable telemetry and use local inference.
+# The libraries read these when imported, so they must be set first.
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["DO_NOT_TRACK"] = "1"

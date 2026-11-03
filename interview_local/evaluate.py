@@ -118,7 +118,6 @@ def _reference_utterances(
     for row in rows:
         begin, finish = float(row["Beg"]) - offset, float(row["End"]) - offset
         if finish > start and begin < end:
-            # Choose evaluation boundaries that include complete reference utterances.
             reference.append(
                 {
                     "start": max(start, begin),

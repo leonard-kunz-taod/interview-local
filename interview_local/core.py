@@ -44,13 +44,9 @@ def merge(
     """Assign words by exclusive overlap; separately retain simultaneous voices.
 
     Args:
-        words: Recognized words with timing.
         turns: Exclusive diarization turns used for word assignment.
         regular_turns: Diarization turns that may overlap; None for legacy input
             without them, which marks overlap detection unavailable.
-
-    Returns:
-        The speaker-attributed transcript.
     """
     turns = sorted(turns, key=lambda t: (t.start, t.end))
     regular = regular_turns or []

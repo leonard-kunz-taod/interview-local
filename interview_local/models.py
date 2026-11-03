@@ -37,5 +37,5 @@ def diarization_checkpoint() -> str:
 
 
 def hub_offline() -> bool:
-    """Whether the run was started with --offline (no Hub downloads)."""
+    """Whether Hub downloads are disabled (HF_HUB_OFFLINE=1)."""
     return os.environ.get("HF_HUB_OFFLINE") == "1"

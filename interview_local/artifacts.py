@@ -38,12 +38,10 @@ def save_readable(result: dict, directory: Path) -> None:
 
 
 def readable_text(result: dict) -> str:
-    """Plain-text rendering of a readable or reviewed transcript."""
     return _readable_document(result, title_marker="", heading_marker="")
 
 
 def readable_markdown(result: dict) -> str:
-    """Markdown rendering of a readable or reviewed transcript."""
     return _readable_document(result, title_marker="# ", heading_marker="### ")
 
 

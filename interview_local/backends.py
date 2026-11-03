@@ -90,7 +90,6 @@ class CommunityDiarizer:
         import soundfile as sf
         import torch
 
-        # The complete, untrimmed recording after PCM decoding.
         data, rate = sf.read(str(audio), dtype="float32", always_2d=True)
         waveform = torch.from_numpy(np.ascontiguousarray(data.T))
         output = self.pipeline(
@@ -157,7 +156,6 @@ class GermanWhisperXAligner:
             return_char_alignments=False,
         )
         aligned_words = aligned["word_segments"]
-        # Preserve all words, including numbers and unalignable characters.
         if not _keeps_every_character(aligned_words, segment["text"]):
             return segment_words(segment, "whisper_fallback")
         print(f"Aligned through {segment['end']:.0f} seconds", flush=True)
@@ -165,7 +163,7 @@ class GermanWhisperXAligner:
 
 
 def _whisper_words(segment) -> list[dict]:
-    """Whisper's timed words of a segment transcribed with word timestamps."""
+    """Whisper's timed words of a segment; raises if it carries no word timestamps."""
     if segment.words is None:
         raise RuntimeError("Whisper returned a segment without word timestamps.")
     return [

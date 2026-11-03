@@ -15,7 +15,6 @@ from .core import render
 
 
 def main() -> int:
-    """Run the command line and return the process exit code."""
     args = _parser().parse_args()
     try:
         return _run(args)
