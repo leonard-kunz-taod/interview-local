@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Interview Local</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Interview Local</h1>
+    <p>German interviews · two speakers · processed on this machine only</p>
+  </header>
+
+  <main>
+    <section id="start-view">
+      <h2>New transcription</h2>
+      <form id="upload-form">
+        <label>Audio file (WAV, MP3 or M4A)
+          <input id="audio-file" type="file" accept=".wav,.mp3,.m4a" required>
+        </label>
+        <label>Name for Speaker A
+          <input id="name-a" type="text" value="Speaker A" required>
+        </label>
+        <label>Name for Speaker B
+          <input id="name-b" type="text" value="Speaker B" required>
+        </label>
+        <button type="submit">Start transcription</button>
+        <p id="upload-error" class="error" hidden></p>
+      </form>
+
+      <h2>Existing transcripts</h2>
+      <ul id="run-list"></ul>
+    </section>
+
+    <section id="progress-view" hidden>
+      <h2>Processing</h2>
+      <ol id="phase-list">
+        <li data-phase="speech_recognition">Speech recognition</li>
+        <li data-phase="speaker_recognition">Speaker recognition</li>
+        <li data-phase="llm">LLM readability draft</li>
+      </ol>
+      <p id="progress-detail"></p>
+      <pre id="progress-error" class="error" hidden></pre>
+      <button id="progress-back" type="button" hidden>Back to start</button>
+    </section>
+
+    <section id="editor-view" hidden>
+      <div id="editor-toolbar">
+        <button id="editor-back" type="button">Back to start</button>
+        <audio id="audio" controls preload="metadata"></audio>
+        <button id="swap-names" type="button">Swap names</button>
+        <label><input id="show-originals" type="checkbox"> Show original words</label>
+        <a id="export-md" download>Export .md</a>
+        <a id="export-txt" download>Export .txt</a>
+      </div>
+      <div id="selection-bar" hidden>
+        <span id="selection-label"></span>
+        <select id="selection-speaker"></select>
+        <button id="selection-assign" type="button">Assign selection</button>
+      </div>
+      <p id="editor-error" class="error" hidden></p>
+      <div id="legend">
+        <span class="llm-changed">changed by LLM</span>
+        <span class="low-asr-confidence">uncertain recognition</span>
+        <span class="speaker-uncertain-sample">uncertain speaker</span>
+      </div>
+      <div id="paragraphs"></div>
+    </section>
+  </main>
+</body>
+</html>

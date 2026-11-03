@@ -5,12 +5,28 @@ import bisect
 import json
 from pathlib import Path
 
+WHISPER_TIMINGS = frozenset({"whisper", "whisper_fallback"})
+
+
 @dataclass
 class Word:
+    """A recognized word.
+
+    ``probability`` is Whisper's word probability. It exists exactly for words
+    with Whisper timing; aligned and estimated words carry ``None`` because no
+    Whisper word corresponds to them.
+    """
     start: float
     end: float
     text: str
+    probability: float | None
     timing: str = "whisper"
+
+    def __post_init__(self):
+        has_whisper_timing = self.timing in WHISPER_TIMINGS
+        if has_whisper_timing != (self.probability is not None):
+            raise ValueError(f"Word '{self.text}' with timing '{self.timing}' has an inconsistent "
+                             f"Whisper probability ({self.probability}).")
 
 @dataclass
 class Turn:
@@ -98,7 +114,8 @@ def merge(words: list[Word], turns: list[Turn], regular_turns: list[Turn] | None
         if simultaneous:
             reasons.append("overlapping_speech")
         assigned.append(dict(word_id=word_id, start=word.start, end=word.end, text=word.text.strip(),
-            speaker=speaker, timing=word.timing, uncertain=bool(reasons), uncertainty_reasons=reasons,
+            speaker=speaker, timing=word.timing, probability=word.probability,
+            uncertain=bool(reasons), uncertainty_reasons=reasons,
             overlap=bool(simultaneous), overlap_speakers=sorted(simultaneous)))
     segments = []
     for w in assigned:

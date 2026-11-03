@@ -67,6 +67,9 @@ def main():
     parser.add_argument("audio", nargs="?", type=Path)
     parser.add_argument("--output", type=Path, help="New, empty output directory")
     parser.add_argument("--gui", action="store_true", help="Optional native Tk window")
+    parser.add_argument("--web", action="store_true", help="Local browser UI on 127.0.0.1 with transcript editor")
+    parser.add_argument("--runs-dir", type=Path, default=Path("transcripts"),
+                        help="Parent directory of web UI runs (default: transcripts/)")
     parser.add_argument("--doctor", action="store_true", help="Check hardware and the local model service")
     parser.add_argument("--prepare", action="store_true", help="Prepare the speech models")
     parser.add_argument("--prepare-llm", action="store_true", help="Download Ministral via local Ollama (no HF login)")
@@ -84,7 +87,12 @@ def main():
     modes.add_argument("--raw-only", action="store_true", help="Speech-to-text only; no diarization, LLM or HF account")
     parser.add_argument("--no-llm", action="store_true", help="Stop after the preserved speaker transcript")
     args = parser.parse_args()
+    runs_root = args.runs_dir.expanduser().resolve()
     try:
+        if args.web:
+            from .web.server import serve
+            serve(runs_root, open_browser=True)
+            return 0
         if args.audio and (args.rename or args.enhance or args.review):
             raise ValueError("Supply audio or a saved-stage command, not both.")
         if args.offline and (args.prepare or args.prepare_llm):

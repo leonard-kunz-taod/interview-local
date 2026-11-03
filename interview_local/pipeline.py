@@ -10,7 +10,8 @@ from .core import Word, Turn, merge
 STEPS = {"decode": "1/5 Decode audio (WAV, MP3 or M4A)",
          "asr": "2/5 Transcribe with Whisper large-v3 (CPU / INT8)",
          "align": "3/5 Align German words (CPU / Float32)",
-         "diarize": "4/5 Identify two speakers (CPU / Float32)"}
+         "diarize": "4/5 Identify two speakers (CPU / Float32)",
+         "check-access": "Checking local community-1 model / Hugging Face access if needed"}
 
 def worker(stage, source, target, status=print, token=None, offline=False):
     env = os.environ.copy()
@@ -46,6 +47,10 @@ def worker(stage, source, target, status=print, token=None, offline=False):
             raise
     if code:
         detail = "\n".join(tail)
+        if stage == "decode":
+            raise RuntimeError("The file could not be read as audio. Check that it plays in an audio player "
+                               "and is not DRM-protected, or try a WAV file.\n"
+                               f"Technical details:\n{detail}")
         raise RuntimeError(f"Stage '{stage}' failed.\n"
             "For 401/403: renew your HF login/read token and accept the community-1 conditions.\n"
             "For download errors, check your connection or model cache. If memory is low, close other apps.\n"
@@ -78,7 +83,7 @@ def process(source: Path, status=print, token=None, offline=False, alignment=Fal
             status(f"Original speech recognition output saved: {output_dir / '01_raw.txt'}")
         if raw_only:
             return raw
-        status("Checking local community-1 model / Hugging Face access if needed")
+        status(STEPS["check-access"])
         worker("check-access", source, work / "access", status, token, offline)
         if alignment:
             status(STEPS["align"])

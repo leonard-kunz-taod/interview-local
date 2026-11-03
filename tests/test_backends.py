@@ -5,7 +5,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from interview_local.backends import GermanWhisperXAligner
+from interview_local.backends import FasterWhisperTranscriber, GermanWhisperXAligner, fallback_words
+
+class TranscriptionTests(unittest.TestCase):
+    def test_word_probability_is_stored(self):
+        word = SimpleNamespace(start=0., end=.4, word=" Guten", probability=.8125)
+        segment = SimpleNamespace(start=0., end=.4, text=" Guten", words=[word])
+        transcriber = FasterWhisperTranscriber.__new__(FasterWhisperTranscriber)
+        transcriber.model = SimpleNamespace(transcribe=lambda *a, **kw: (iter([segment]), SimpleNamespace(language="de")))
+        result = transcriber.transcribe(Path("unused.wav"))
+        self.assertEqual(result["segments"][0]["words"][0]["probability"], .8125)
+
+    def test_segment_without_words_has_no_whisper_probability(self):
+        words = fallback_words(dict(start=0., end=1., text="Guten Tag", words=[]))
+        self.assertEqual([(w["timing"], w["probability"]) for w in words], [("estimated", None)])
 
 class AlignmentTests(unittest.TestCase):
     def test_word_loss_falls_back_and_missing_time_is_marked(self):

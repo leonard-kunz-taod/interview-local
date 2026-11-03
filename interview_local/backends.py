@@ -28,7 +28,8 @@ class FasterWhisperTranscriber:
         for s in segments:
             print(f"Transcribed through {s.end:.0f} seconds", flush=True)
             result.append(dict(start=s.start, end=s.end, text=s.text,
-                words=[dict(start=w.start, end=w.end, text=w.word, timing="whisper") for w in s.words or []]))
+                words=[dict(start=w.start, end=w.end, text=w.word, timing="whisper",
+                           probability=float(w.probability)) for w in s.words or []]))
         return dict(segments=result, language=info.language)
 
 class CommunityDiarizer:
@@ -110,11 +111,12 @@ class GermanWhisperXAligner:
                     timed = "start" in w and "end" in w
                     words.append(dict(start=w.get("start", 0.) + start/rate,
                         end=w.get("end", len(chunk)/rate) + start/rate,
-                        text=w["word"], timing="aligned" if timed else "estimated"))
+                        text=w["word"], timing="aligned" if timed else "estimated", probability=None))
                 print(f"Aligned through {segment['end']:.0f} seconds", flush=True)
         return words
 
 def fallback_words(segment):
     if segment.get("words"):
         return [dict(w, timing="whisper_fallback") for w in segment["words"]]
-    return [dict(start=segment["start"], end=segment["end"], text=segment["text"], timing="estimated")]
+    return [dict(start=segment["start"], end=segment["end"], text=segment["text"], timing="estimated",
+                 probability=None)]

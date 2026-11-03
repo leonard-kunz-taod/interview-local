@@ -11,3 +11,5 @@ dependencies = ["onnxruntime>=1.20,<2", "psutil>=6,<8", "av>=14,<19", "soundfile
 interview-local = "interview_local.cli:main"
 [tool.setuptools.packages.find]
 include = ["interview_local*"]
+[tool.setuptools.package-data]
+"interview_local.web" = ["static/*"]

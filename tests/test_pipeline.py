@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from interview_local.pipeline import process
+from interview_local.pipeline import process, worker
 
 class PipelineTests(unittest.TestCase):
     def test_orchestration_sequential_and_cleanup(self):
@@ -18,7 +18,7 @@ class PipelineTests(unittest.TestCase):
                 target.touch()
             else:
                 content = {"asr": {"segments": []},
-                    "align": [{"start": 0, "end": 1, "text": "Hallo", "timing": "aligned"}],
+                    "align": [{"start": 0, "end": 1, "text": "Hallo", "timing": "aligned", "probability": None}],
                     "diarize": [{"start": 0, "end": 1, "speaker": "s0"}]}[stage]
                 target.write_text(json.dumps(content))
         with tempfile.TemporaryDirectory() as d:
@@ -40,6 +40,16 @@ class PipelineTests(unittest.TestCase):
             with patch("interview_local.pipeline.worker", side_effect=RuntimeError("Broken")):
                 with self.assertRaises(RuntimeError):
                     process(p, status=lambda _: None)
+
+class DecodeFailureTests(unittest.TestCase):
+    def test_unreadable_audio_gets_its_own_message(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d)/"notes.wav"
+            fake.write_text("This is not audio.")
+            with self.assertRaises(RuntimeError) as raised:
+                worker("decode", fake, Path(d)/"decoded.wav", status=lambda _: None)
+        self.assertIn("could not be read as audio", str(raised.exception))
+        self.assertNotIn("401/403", str(raised.exception))
 
 if __name__ == "__main__":
     unittest.main()
