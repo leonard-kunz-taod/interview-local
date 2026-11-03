@@ -25,7 +25,7 @@ class FakeClient:
     def ready(self):
         return {"model": "fake-local-test"}
 
-    def prepare(self, status=print):
+    def prepare(self, status):
         self.prepared = True
         return self.ready()
 

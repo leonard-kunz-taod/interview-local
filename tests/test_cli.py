@@ -47,7 +47,7 @@ def saved_stage(directory, name, value):
 
 def speaker_transcript():
     return merge(
-        [Word(0, 0.3, "Hallo"), Word(0.3, 0.7, "zusammen.")], [Turn(0, 1, "s")]
+        [Word(0, 0.3, "Hallo"), Word(0.3, 0.7, "zusammen.")], [Turn(0, 1, "s")], []
     )
 
 
@@ -146,9 +146,8 @@ class SavedStageTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
     def test_review_saves_only_the_review_stage(self):
-        draft = enhance(
-            speaker_transcript(), client=FakeClient(), status=lambda _: None
-        )
+        with patch("interview_local.llm.OllamaClient", FakeClient):
+            draft = enhance(speaker_transcript(), lambda _: None)
         with tempfile.TemporaryDirectory() as directory:
             source = saved_stage(directory, "03_readable.json", draft)
             output = Path(directory) / "review"

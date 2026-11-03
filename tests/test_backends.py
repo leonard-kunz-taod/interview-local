@@ -134,9 +134,9 @@ class TranscriptionTests(unittest.TestCase):
             },
         )
 
-    def test_segment_without_word_timestamps_has_no_words(self):
-        result, _ = recognized([whisper_segment(0.5, None)])
-        self.assertEqual(result["segments"][0]["words"], [])
+    def test_segment_without_word_timestamps_is_refused(self):
+        with self.assertRaisesRegex(RuntimeError, "without word timestamps"):
+            recognized([whisper_segment(0.5, None)])
 
     def test_progress_is_reported_per_segment(self):
         _, printed = recognized([whisper_segment(12.4, []), whisper_segment(30, [])])

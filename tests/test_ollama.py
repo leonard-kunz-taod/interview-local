@@ -54,7 +54,8 @@ class ReadinessTests(unittest.TestCase):
         )
 
     def test_missing_model_is_reported(self):
-        service = FakeOllamaService(dict(INSTALLED, **{"/api/tags": body({})}))
+        tags = body({"models": []})
+        service = FakeOllamaService(dict(INSTALLED, **{"/api/tags": tags}))
         with self.assertRaises(RuntimeError):
             client_for(service).ready()
 
@@ -67,26 +68,6 @@ class ReadinessTests(unittest.TestCase):
     def test_unreachable_service_states_that_no_cloud_fallback_is_used(self):
         with self.assertRaisesRegex(RuntimeError, "No cloud fallback is used"):
             client_for(UnreachableService()).ready()
-
-    def test_endpoint_must_be_local_loopback_http(self):
-        for url in (
-            "https://example.org",
-            "http://example.org",
-            "http://localhost@evil.org",
-            "http://127.0.0.1/redirect",
-            "http://user:secret@127.0.0.1:11434",
-            "http://127.0.0.1:11434/?model=x",
-            "http://127.0.0.1:11434/#fragment",
-        ):
-            with self.subTest(url=url), self.assertRaises(ValueError):
-                OllamaClient(url)
-
-    def test_loopback_endpoints_are_accepted_without_a_trailing_slash(self):
-        urls = ("http://127.0.0.1:11434/", "http://localhost:11434", "http://[::1]")
-        self.assertEqual(
-            [OllamaClient(url).base_url for url in urls],
-            ["http://127.0.0.1:11434", "http://localhost:11434", "http://[::1]"],
-        )
 
     def test_remote_model_reference_is_rejected_as_cloud_backed(self):
         show = body({"remote_model": "ministral-cloud"})

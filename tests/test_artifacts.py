@@ -34,7 +34,7 @@ NOTICE = "Machine-generated draft. Check uncertain passages against the audio."
 
 
 def named_speaker_transcript():
-    result = merge([Word(0, 1, "Grüße")], [Turn(0, 2, "x")])
+    result = merge([Word(0, 1, "Grüße")], [Turn(0, 2, "x")], [])
     result["speakers"]["A"] = "Änne"
     return result
 

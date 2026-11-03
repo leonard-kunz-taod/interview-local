@@ -43,7 +43,9 @@ def main() -> None:
         args.output.write_text(result, encoding="utf-8")
 
 
-def score(reference_file, hypothesis_file, offset, start, end) -> dict:
+def score(
+    reference_file: Path, hypothesis_file: Path, offset: float, start: float, end: float
+) -> dict:
     """WER, and with diarization DER and cpWER, inside one time window.
 
     Args:
@@ -56,10 +58,10 @@ def score(reference_file, hypothesis_file, offset, start, end) -> dict:
     Raises:
         ValueError: The window holds no reference words.
     """
-    with Path(reference_file).open(encoding="utf-8") as table:
+    with reference_file.open(encoding="utf-8") as table:
         rows = list(csv.DictReader(table, delimiter="\t"))
     reference = _reference_utterances(rows, offset, start, end)
-    hypothesis = json.loads(Path(hypothesis_file).read_text(encoding="utf-8"))
+    hypothesis = json.loads(hypothesis_file.read_text(encoding="utf-8"))
     hyp = _hypothesis_words(hypothesis, start, end)
     report = _word_errors(reference, hyp)
     report.update(
@@ -102,7 +104,9 @@ def distance(reference: list[str], hypothesis: list[str]) -> int:
     return previous[-1]
 
 
-def _reference_utterances(rows: list[dict], offset, start, end) -> list[dict]:
+def _reference_utterances(
+    rows: list[dict], offset: float, start: float, end: float
+) -> list[dict]:
     """Reference utterances shifted by offset and clipped to the window."""
     reference = []
     for row in rows:
@@ -120,7 +124,7 @@ def _reference_utterances(rows: list[dict], offset, start, end) -> list[dict]:
     return reference
 
 
-def _hypothesis_words(hypothesis: dict, start, end) -> list[dict]:
+def _hypothesis_words(hypothesis: dict, start: float, end: float) -> list[dict]:
     """Hypothesis words whose midpoint lies inside the window."""
     words = _transcript_words(hypothesis)
     return [w for w in words if start <= (w["start"] + w["end"]) / 2 < end]
@@ -154,7 +158,9 @@ def _word_errors(reference: list[dict], hyp: list[dict]) -> dict:
     }
 
 
-def _diarization_error(reference: list[dict], turns: list[dict], start, end) -> dict:
+def _diarization_error(
+    reference: list[dict], turns: list[dict], start: float, end: float
+) -> dict:
     from pyannote.core import Segment, Timeline
     from pyannote.metrics.diarization import DiarizationErrorRate
 
@@ -174,7 +180,7 @@ def _reference_annotation(reference: list[dict]):
     return annotation
 
 
-def _clipped_annotation(turns: list[dict], start, end):
+def _clipped_annotation(turns: list[dict], start: float, end: float):
     """Hypothesis turns that reach into the window, clipped to it."""
     from pyannote.core import Annotation, Segment
 

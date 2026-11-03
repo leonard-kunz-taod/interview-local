@@ -23,7 +23,7 @@ class FakeWorker:
         self.workspaces = []
         self.tokens = set()
 
-    def __call__(self, stage, source, target, status=None, token=None, offline=False):
+    def __call__(self, stage, source, target, status, token, offline):
         self.stages.append(stage)
         self.workspaces.append(target.parent)
         self.tokens.add(token)
@@ -37,14 +37,19 @@ def silent(_message):
     pass
 
 
+def processed(audio, output_dir, alignment=False):
+    """Process audio offline and without a token, reporting nothing."""
+    return process(audio, silent, None, False, alignment, output_dir)
+
+
 class ProcessTests(unittest.TestCase):
-    def run_process(self, outputs, **options):
+    def run_process(self, outputs, alignment=False):
         worker = FakeWorker(outputs)
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "test.m4a"
             audio.touch()
             with patch("interview_local.pipeline.worker", worker):
-                result = process(audio, status=silent, **options)
+                result = processed(audio, Path(directory) / "output", alignment)
         return worker, result
 
     def test_speech_stages_run_sequentially_in_separate_workers(self):
@@ -107,7 +112,7 @@ class ProcessTests(unittest.TestCase):
             audio.touch()
             output = Path(directory) / "output"
             with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
-                process(audio, status=silent, alignment=True, output_dir=output)
+                processed(audio, output, alignment=True)
             saved = sorted(os.listdir(output))
         self.assertEqual(
             saved, ["01_raw.json", "01_raw.txt", "02_speakers.json", "02_speakers.txt"]
@@ -137,14 +142,16 @@ class TranscribeTests(unittest.TestCase):
 
 
 class PrepareTests(unittest.TestCase):
-    def prepared_stages(self, **options):
+    def prepared_stages(self, alignment):
         worker = FakeWorker({})
         with patch("interview_local.pipeline.worker", worker):
-            prepare(status=silent, **options)
+            prepare(silent, None, alignment)
         return worker.stages
 
     def test_preparation_loads_diarization_and_speech_models(self):
-        self.assertEqual(self.prepared_stages(), ["prepare-diarize", "prepare-asr"])
+        self.assertEqual(
+            self.prepared_stages(alignment=False), ["prepare-diarize", "prepare-asr"]
+        )
 
     def test_preparation_with_alignment_also_loads_the_alignment_model(self):
         self.assertEqual(
@@ -156,14 +163,14 @@ class PrepareTests(unittest.TestCase):
 class InputTests(unittest.TestCase):
     def test_missing_audio_file_is_rejected(self):
         with self.assertRaises(ValueError):
-            process(Path("/missing.wav"))
+            processed(Path("/missing.wav"), Path("/missing-output"))
 
     def test_unsupported_audio_format_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "audio.ogg"
             audio.touch()
             with self.assertRaises(ValueError):
-                process(audio, status=silent)
+                processed(audio, Path(directory) / "output")
 
     def test_output_directory_with_completed_stages_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -171,7 +178,7 @@ class InputTests(unittest.TestCase):
             audio.touch()
             (Path(directory) / "01_raw.json").touch()
             with self.assertRaises(ValueError):
-                process(audio, status=silent, output_dir=Path(directory))
+                processed(audio, Path(directory))
 
     def test_worker_failure_propagates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -184,7 +191,7 @@ class InputTests(unittest.TestCase):
                 ),
                 self.assertRaises(RuntimeError),
             ):
-                process(audio, status=silent)
+                processed(audio, Path(directory) / "output")
 
 
 class PreservationTests(unittest.TestCase):
@@ -203,7 +210,7 @@ class PreservationTests(unittest.TestCase):
             patch("interview_local.pipeline.worker", worker),
             self.assertRaises(RuntimeError),
         ):
-            process(audio, output_dir=output, status=silent)
+            processed(audio, output)
 
     def test_raw_stage_files_survive_a_later_failure(self):
         with tempfile.TemporaryDirectory() as directory:

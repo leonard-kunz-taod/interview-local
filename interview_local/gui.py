@@ -126,8 +126,13 @@ def launch():
         )
         if not base:
             return
-        output = Path(base) / datetime.now().strftime("interview_%Y-%m-%d_%H-%M-%S-%f")
-        options = speech_options()
+        run_output = Path(base) / datetime.now().strftime(
+            "interview_%Y-%m-%d_%H-%M-%S-%f"
+        )
+        output = run_output
+        entered_token = token.get().strip() or None
+        offline_only = offline.get()
+        aligned = alignment.get()
         names_snapshot = entered_names()
         edit_enabled = use_llm.get()
         clear_views()
@@ -135,20 +140,15 @@ def launch():
         def job():
             if edit_enabled:
                 OllamaClient().ready()
-            result = process(source, status=progress, output_dir=output, **options)
+            result = process(
+                source, progress, entered_token, offline_only, aligned, run_output
+            )
             result["speakers"].update(names_snapshot)
-            save_speakers_with_aliases(result, output)
+            save_speakers_with_aliases(result, run_output)
             if edit_enabled:
-                save_readable(enhance(result, status=progress), output)
+                save_readable(enhance(result, progress), run_output)
 
         submit(job)
-
-    def speech_options():
-        return {
-            "token": token.get().strip() or None,
-            "offline": offline.get(),
-            "alignment": alignment.get(),
-        }
 
     def entered_names():
         return {
@@ -168,13 +168,14 @@ def launch():
         )
         if not selected:
             return
-        output = Path(selected).parent / datetime.now().strftime(
+        review_output = Path(selected).parent / datetime.now().strftime(
             "review_%Y-%m-%d_%H-%M-%S-%f"
         )
+        output = review_output
 
         def job():
             edited = json.loads(Path(selected).read_text(encoding="utf-8"))
-            save_readable(review(edited, status=progress), output)
+            save_readable(review(edited, progress), review_output)
 
         submit(job)
 

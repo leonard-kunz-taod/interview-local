@@ -106,11 +106,11 @@ def _run(args: argparse.Namespace) -> int:
     if args.gui:
         try:
             from .gui import launch
-
-            launch()
-            return 0
         except ImportError:
             print("Tk is not installed. Falling back to the terminal dialog.")
+        else:
+            launch()
+            return 0
     return _run_terminal_mode(args)
 
 
@@ -164,15 +164,15 @@ def _doctor() -> None:
 
 
 def _print_ram() -> None:
-    try:
-        import psutil
+    import psutil
 
+    try:
         memory = psutil.virtual_memory()
         print(
             f"RAM: {memory.total / 2**30:.1f} GiB total; "
             f"{memory.available / 2**30:.1f} GiB available"
         )
-    except (ImportError, OSError):
+    except OSError:
         print("Could not read RAM information automatically.")
 
 
@@ -199,9 +199,9 @@ def _print_local_llm() -> None:
 
 def _prepare(speech_models: bool, language_model: bool, alignment: bool) -> int:
     if speech_models:
-        pipeline.prepare(token=_get_token(), alignment=alignment)
+        pipeline.prepare(print, _get_token(), alignment)
     if language_model:
-        llm.OllamaClient().prepare()
+        llm.OllamaClient().prepare(print)
     print("Preparation complete.")
     return 0
 
@@ -209,7 +209,7 @@ def _prepare(speech_models: bool, language_model: bool, alignment: bool) -> int:
 def _review_saved(readable_file: Path, output_path: Path | None) -> int:
     edited = _load_stage(readable_file)
     output = _create_output(output_path)
-    _save_and_print_readable(llm.review(edited), output)
+    _save_and_print_readable(llm.review(edited, print), output)
     print(f"Review saved to {output}. Source and readable draft were not overwritten.")
     return 0
 
@@ -219,7 +219,7 @@ def _enhance_saved(speaker_file: Path, output_path: Path | None) -> int:
     if "words" not in source or "speakers" not in source:
         raise ValueError("Enhancement requires a stage-2 speaker transcript JSON.")
     output = _create_output(output_path)
-    _save_and_print_readable(llm.enhance(source), output)
+    _save_and_print_readable(llm.enhance(source, print), output)
     print(f"Readable TXT/Markdown and audit JSON saved to {output}")
     return 0
 
@@ -250,7 +250,7 @@ def _process_audio(args: argparse.Namespace) -> int:
     if args.no_llm:
         print(render(result))
     else:
-        _save_and_print_readable(llm.enhance(result), output)
+        _save_and_print_readable(llm.enhance(result, print), output)
         print("For the separate comparison pass, run --review on 03_readable.json.")
     print(f"Completed stages saved to {output}")
     return 0
@@ -269,6 +269,7 @@ def _speaker_transcript(audio: Path, args: argparse.Namespace, output: Path) -> 
     token = None if args.offline else _get_token()
     return pipeline.process(
         audio,
+        print,
         token=token,
         offline=args.offline,
         alignment=args.alignment,

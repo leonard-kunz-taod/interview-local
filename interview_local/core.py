@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+import itertools
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -38,7 +39,7 @@ class DiarizationResult:
 
 
 def merge(
-    words: list[Word], turns: list[Turn], regular_turns: list[Turn] | None = None
+    words: list[Word], turns: list[Turn], regular_turns: list[Turn] | None
 ) -> dict:
     """Assign words by exclusive overlap; separately retain simultaneous voices.
 
@@ -69,7 +70,7 @@ def merge(
     }
 
 
-def overlap_regions(turns: list[Turn], mapping: dict) -> list[dict]:
+def overlap_regions(turns: list[Turn], mapping: dict[str, str]) -> list[dict]:
     """Sweep regular turns; duplicate tracks from one speaker are not overlap."""
     regions = []
     for start, end, speakers in _simultaneous_intervals(turns, mapping):
@@ -85,7 +86,7 @@ def segment_words(segment: dict, timing: str) -> list[dict]:
 
     A segment without word timestamps becomes one word with estimated timing.
     """
-    if segment.get("words"):
+    if segment["words"]:
         return [dict(w, timing=timing) for w in segment["words"]]
     return [
         {
@@ -121,7 +122,7 @@ def _review_flags(segment: dict) -> str:
     return f" [{'; '.join(flags)}]" if flags else ""
 
 
-def _speaker_labels(turns: list[Turn], regular_turns: list[Turn]) -> dict:
+def _speaker_labels(turns: list[Turn], regular_turns: list[Turn]) -> dict[str, str]:
     """Letter speakers in order of their first exclusive, then regular, turn."""
     ordered = [*turns, *sorted(regular_turns, key=lambda t: t.start)]
     ids = dict.fromkeys(t.speaker for t in ordered)
@@ -129,22 +130,21 @@ def _speaker_labels(turns: list[Turn], regular_turns: list[Turn]) -> dict:
 
 
 def _simultaneous_intervals(
-    turns: list[Turn], mapping: dict
+    turns: list[Turn], mapping: dict[str, str]
 ) -> Iterator[tuple[float, float, list[str]]]:
     """Consecutive sweep intervals in which more than one speaker is active."""
-    active = Counter()
-    previous = None
-    for current, changes in sorted(_speaker_events(turns).items()):
+    active: Counter[str] = Counter()
+    events = sorted(_speaker_events(turns).items())
+    for (previous, changes), (current, _) in itertools.pairwise(events):
+        active.update(changes)
         speakers = _active_labels(active, mapping)
         if len(speakers) > 1:
             yield previous, current, speakers
-        active.update(changes)
-        previous = current
 
 
-def _speaker_events(turns: list[Turn]) -> dict[float, Counter]:
+def _speaker_events(turns: list[Turn]) -> dict[float, Counter[str]]:
     """Per instant, how many tracks of each speaker start (+1) or end (-1)."""
-    events = defaultdict(Counter)
+    events: defaultdict[float, Counter[str]] = defaultdict(Counter)
     for turn in turns:
         if turn.end > turn.start:
             events[turn.start][turn.speaker] += 1
@@ -152,7 +152,7 @@ def _speaker_events(turns: list[Turn]) -> dict[float, Counter]:
     return events
 
 
-def _active_labels(active: Counter, mapping: dict) -> list[str]:
+def _active_labels(active: Counter[str], mapping: dict[str, str]) -> list[str]:
     return sorted(mapping[s] for s, count in active.items() if count > 0)
 
 
@@ -161,7 +161,7 @@ def _continues_region(region: dict, start: float, speakers: list[str]) -> bool:
 
 
 def _attributed_words(
-    words: list[Word], turns: list[Turn], regions: list[dict], labels: dict
+    words: list[Word], turns: list[Turn], regions: list[dict], labels: dict[str, str]
 ) -> list[dict]:
     turn_starts = [t.start for t in turns]
     region_starts = [r["start"] for r in regions]
@@ -204,7 +204,9 @@ def _ranked_candidates(
     return candidates
 
 
-def _best_speaker(candidates: list[tuple[float, Turn]], labels: dict) -> str | None:
+def _best_speaker(
+    candidates: list[tuple[float, Turn]], labels: dict[str, str]
+) -> str | None:
     """Label of the most overlapping turn; None leaves the word unassigned."""
     return labels[candidates[0][1].speaker] if candidates else None
 
@@ -288,7 +290,7 @@ def _continues(segment: dict, word: dict) -> bool:
     )
 
 
-def _labelled(turns: list[Turn], labels: dict) -> list[dict]:
+def _labelled(turns: list[Turn], labels: dict[str, str]) -> list[dict]:
     return [
         {"start": t.start, "end": t.end, "speaker": labels[t.speaker]} for t in turns
     ]

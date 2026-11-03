@@ -55,7 +55,7 @@ class WorkerProcessTests(unittest.TestCase):
             source = Path(directory) / "stereo.wav"
             target = Path(directory) / "decoded.wav"
             stereo_recording(source)
-            worker("decode", source, target, status=lambda _: None)
+            worker("decode", source, target, silent, None, False)
             info = sf.info(target)
         self.assertEqual(
             (info.samplerate, info.channels, info.subtype), (16000, 1, "PCM_16")
@@ -66,7 +66,8 @@ class WorkerProcessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "stereo.wav"
             stereo_recording(source)
-            worker("decode", source, Path(directory) / "out.wav", messages.append)
+            target = Path(directory) / "out.wav"
+            worker("decode", source, target, messages.append, None, False)
         self.assertTrue(
             any(m.startswith("Stage decode completed in") for m in messages)
         )
@@ -76,13 +77,13 @@ class WorkerProcessTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             self.assertRaisesRegex(RuntimeError, "Unknown processing stage"),
         ):
-            worker("unknown", Path(directory), Path(directory), lambda _: None)
+            worker("unknown", Path(directory), Path(directory), silent, None, False)
 
     def test_token_is_redacted_from_failure_details(self):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / f"{TOKEN}.wav"
             with self.assertRaises(RuntimeError) as failure:
-                worker("decode", missing, missing, lambda _: None, TOKEN)
+                worker("decode", missing, missing, silent, TOKEN, False)
         self.assertNotIn(TOKEN, str(failure.exception))
 
     def test_cancelling_during_a_stage_stops_the_worker(self):
@@ -93,7 +94,8 @@ class WorkerProcessTests(unittest.TestCase):
             source = Path(directory) / "stereo.wav"
             stereo_recording(source)
             with self.assertRaises(KeyboardInterrupt):
-                worker("decode", source, Path(directory) / "out.wav", cancel)
+                target = Path(directory) / "out.wav"
+                worker("decode", source, target, cancel, None, False)
 
 
 class StageTests(unittest.TestCase):

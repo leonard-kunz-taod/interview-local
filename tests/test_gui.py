@@ -23,7 +23,6 @@ COMPARE = "Compare readable draft …"
 PREPARE = "Download / prepare Ministral"
 CHOOSE = "Choose audio file …"
 USE_LLM = "Create a readable draft with local Ministral"
-OFFLINE = "Offline speech models (download caches first)"
 LONG_MESSAGE = "x" * 600 + "end"
 POLL_ATTEMPTS = 500
 
@@ -33,7 +32,7 @@ class BlockingClient(FakeClient):
 
     release = threading.Event()
 
-    def prepare(self, status=print):
+    def prepare(self, status):
         status(LONG_MESSAGE)
         BlockingClient.release.wait()
         return super().prepare(status)
@@ -167,8 +166,8 @@ class ProcessingTests(WindowTestCase):
 
 class ComparisonTests(WindowTestCase):
     def saved_draft(self):
-        speakers = merge([Word(0, 0.5, "Hallo")], [Turn(0, 1, "s")])
-        draft = enhance(speakers, client=FakeClient(), status=lambda _: None)
+        speakers = merge([Word(0, 0.5, "Hallo")], [Turn(0, 1, "s")], [])
+        draft = enhance(speakers, lambda _: None)
         path = self.directory / "03_readable.json"
         path.write_text(json.dumps(draft), encoding="utf-8")
         return path

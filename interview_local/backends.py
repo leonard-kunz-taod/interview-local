@@ -47,12 +47,13 @@ class FasterWhisperTranscriber:
         result = []
         for s in segments:
             print(f"Transcribed through {s.end:.0f} seconds", flush=True)
-            words = [
-                {"start": w.start, "end": w.end, "text": w.word, "timing": "whisper"}
-                for w in s.words or []
-            ]
             result.append(
-                {"start": s.start, "end": s.end, "text": s.text, "words": words}
+                {
+                    "start": s.start,
+                    "end": s.end,
+                    "text": s.text,
+                    "words": _whisper_words(s),
+                }
             )
         return {"segments": result, "language": info.language}
 
@@ -155,12 +156,22 @@ class GermanWhisperXAligner:
             "cpu",
             return_char_alignments=False,
         )
-        aligned_words = aligned.get("word_segments", [])
+        aligned_words = aligned["word_segments"]
         # Preserve all words, including numbers and unalignable characters.
         if not _keeps_every_character(aligned_words, segment["text"]):
             return segment_words(segment, "whisper_fallback")
         print(f"Aligned through {segment['end']:.0f} seconds", flush=True)
         return _timed_words(aligned_words, start / rate, duration)
+
+
+def _whisper_words(segment) -> list[dict]:
+    """Whisper's timed words of a segment transcribed with word timestamps."""
+    if segment.words is None:
+        raise RuntimeError("Whisper returned a segment without word timestamps.")
+    return [
+        {"start": w.start, "end": w.end, "text": w.word, "timing": "whisper"}
+        for w in segment.words
+    ]
 
 
 def _disable_runtime_telemetry():

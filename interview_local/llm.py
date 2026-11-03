@@ -11,9 +11,11 @@ import hashlib
 import json
 import re
 import urllib.error
-import urllib.parse
 import urllib.request
+from collections.abc import Callable, Collection, Iterable
 from copy import deepcopy
+from email.message import Message
+from typing import IO, NoReturn
 
 MODEL = "ministral-3:8b"
 MODEL_SCHEMA = {
@@ -102,7 +104,6 @@ A false flag means no further issue found in this comparison, not proven accurac
 
 
 LOCAL_ENDPOINT = "http://127.0.0.1:11434"
-LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 REQUEST_TIMEOUT_SECONDS = 600
 EDIT_CHUNK_WORDS = 120
 CONTEXT_WORDS = 12
@@ -117,22 +118,25 @@ MAX_FEEDBACK_CHARS = 500
 MAX_REVIEW_REASONS = 10
 REORDERED_WORDS = "The editor skipped, duplicated or reordered source words."
 INVALID_REVIEW = "Invalid reviewer response."
+INVALID_RESPONSE_ERRORS = (ValueError, KeyError, TypeError)
+# Transcripts saved by earlier versions may lack these word fields.
+LEGACY_WORD_FIELDS = {
+    "speaker": None,
+    "uncertain": False,
+    "overlap": False,
+    "uncertainty_reasons": [],
+}
 
 
 class OllamaClient:
-    """The local Ollama service; non-loopback endpoints and redirects are refused."""
+    """The local Ollama service on loopback; proxies and redirects are refused."""
 
-    def __init__(self, base_url=LOCAL_ENDPOINT):
-        if not _is_loopback_http_root(base_url):
-            raise ValueError(
-                "The model endpoint must be a local loopback HTTP address."
-            )
-        self.base_url = base_url.rstrip("/")
+    def __init__(self) -> None:
         self.opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), _NoRedirect()
         )
 
-    def request(self, endpoint, data=None, timeout=REQUEST_TIMEOUT_SECONDS):
+    def request(self, endpoint: str, data: dict | None, timeout: float) -> dict:
         try:
             with self.opener.open(
                 self._json_request(endpoint, data), timeout=timeout
@@ -155,17 +159,17 @@ class OllamaClient:
         Raises:
             RuntimeError: The model is missing or backed by a cloud service.
         """
-        models = self.request("/api/tags", timeout=10).get("models", [])
+        models = self.request("/api/tags", None, timeout=10)["models"]
         entry = _installed_model(models)
         details = self.request("/api/show", {"model": MODEL}, timeout=30)
         _reject_cloud_backed(details)
         return {
             "model": MODEL,
-            "digest": entry.get("digest"),
-            "quantization": details.get("details", {}).get("quantization_level"),
+            "digest": entry["digest"],
+            "quantization": details["details"]["quantization_level"],
         }
 
-    def prepare(self, status=print) -> dict:
+    def prepare(self, status: Callable[[str], None]) -> dict:
         """Download the model from the Ollama registry, reporting progress."""
         status(f"Downloading {MODEL} from the Ollama registry (no HF account needed) …")
         # The pull endpoint streams progress; do not print download tokens or text.
@@ -180,7 +184,7 @@ class OllamaClient:
             ) from None
         return self.ready()
 
-    def chat(self, instruction, data, schema):
+    def chat(self, instruction: str, data: dict, schema: dict) -> dict:
         response = self.request(
             "/api/chat",
             {
@@ -194,6 +198,7 @@ class OllamaClient:
                 "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 3072},
                 "keep_alive": "5m",
             },
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
         if response.get("done_reason") == "length":
             raise ValueError(
@@ -201,34 +206,33 @@ class OllamaClient:
             )
         return json.loads(response["message"]["content"])
 
-    def unload(self):
+    def unload(self) -> None:
         try:
             self.request("/api/generate", {"model": MODEL, "keep_alive": 0}, timeout=30)
         except RuntimeError:
             pass
 
-    def _json_request(self, endpoint, data):
+    def _json_request(self, endpoint: str, data: dict | None) -> urllib.request.Request:
         payload = None if data is None else json.dumps(data).encode()
         return urllib.request.Request(
-            self.base_url + endpoint,
+            LOCAL_ENDPOINT + endpoint,
             data=payload,
             headers={"Content-Type": "application/json"},
         )
 
 
-def enhance(source: dict, client: OllamaClient | None = None, status=print) -> dict:
+def enhance(source: dict, status: Callable[[str], None]) -> dict:
     """Readable draft of a speaker transcript, validated against its source words.
 
     Args:
         source: Stage-2 speaker transcript; it is not modified.
-        client: The local model service.
         status: Receives progress messages.
 
     Returns:
         The stage-3 readable transcript with an embedded, fingerprinted source.
     """
     words = _source_words(source)
-    client = client or OllamaClient()
+    client = OllamaClient()
     identity = client.ready()
     try:
         paragraphs, rejected = _edited_chunks(client, source["speakers"], words, status)
@@ -254,12 +258,11 @@ def enhance(source: dict, client: OllamaClient | None = None, status=print) -> d
     }
 
 
-def review(edited: dict, client: OllamaClient | None = None, status=print) -> dict:
+def review(edited: dict, status: Callable[[str], None]) -> dict:
     """Separate model comparison of a readable draft against its embedded source.
 
     Args:
         edited: Stage-3 readable transcript; it is not modified.
-        client: The local model service.
         status: Receives progress messages.
 
     Returns:
@@ -269,7 +272,7 @@ def review(edited: dict, client: OllamaClient | None = None, status=print) -> di
         ValueError: The draft is not stage 3, or no longer matches its source.
     """
     words = _verified_source_words(edited)
-    client = client or OllamaClient()
+    client = OllamaClient()
     identity = client.ready()
     result = deepcopy(edited)
     result["stage"] = "review"
@@ -290,26 +293,22 @@ def review(edited: dict, client: OllamaClient | None = None, status=print) -> di
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Message,
+        newurl: str,
+    ) -> NoReturn:
         raise RuntimeError("Refusing an HTTP redirect from the local model service.")
-
-
-def _is_loopback_http_root(url: str) -> bool:
-    """Plain HTTP to a loopback host without credentials, path, query or fragment."""
-    parsed = urllib.parse.urlsplit(url)
-    extras = (parsed.username, parsed.password, parsed.query, parsed.fragment)
-    return (
-        parsed.scheme == "http"
-        and parsed.hostname in LOOPBACK_HOSTS
-        and parsed.path in {"", "/"}
-        and not any(extras)
-    )
 
 
 def _installed_model(models: list[dict]) -> dict:
     """The tag entry of the editor model among the locally installed models."""
     for entry in models:
-        if entry.get("name") == MODEL:
+        if entry["name"] == MODEL:
             return entry
     raise RuntimeError(
         f"{MODEL} is not installed locally. Run interview-local --prepare-llm "
@@ -324,7 +323,9 @@ def _reject_cloud_backed(details: dict) -> None:
         )
 
 
-def _report_pull_progress(lines, status) -> None:
+def _report_pull_progress(
+    lines: Iterable[bytes], status: Callable[[str], None]
+) -> None:
     last = None
     for line in lines:
         update = json.loads(line)
@@ -339,8 +340,8 @@ def _report_pull_progress(lines, status) -> None:
 def _progress_text(update: dict) -> str:
     total, completed = update.get("total"), update.get("completed", 0)
     if total:
-        return f"{update.get('status', '')} {completed * 100 // total}%"
-    return update.get("status", "")
+        return f"{update['status']} {completed * 100 // total}%"
+    return update["status"]
 
 
 def _fingerprint(value) -> str:
@@ -355,9 +356,12 @@ def _tokens(text: str) -> list[str]:
 
 
 def _source_words(source: dict) -> list[dict]:
-    words = deepcopy(source.get("words", []))
+    """Numbered source words, with neutral values for fields of earlier versions."""
+    words = deepcopy(source["words"])
     for i, w in enumerate(words):
         w.setdefault("word_id", i)
+        for field, neutral in LEGACY_WORD_FIELDS.items():
+            w.setdefault(field, deepcopy(neutral))
     if [w["word_id"] for w in words] != list(range(len(words))):
         raise ValueError(
             "Source word IDs must be unique, ordered and consecutive from zero."
@@ -365,7 +369,12 @@ def _source_words(source: dict) -> list[dict]:
     return words
 
 
-def _edited_chunks(client, speakers: dict, words: list[dict], status):
+def _edited_chunks(
+    client: OllamaClient,
+    speakers: dict,
+    words: list[dict],
+    status: Callable[[str], None],
+) -> tuple[list[dict], int]:
     """Edited paragraphs of every chunk, and how many chunks were rejected."""
     paragraphs = []
     rejected = 0
@@ -375,13 +384,15 @@ def _edited_chunks(client, speakers: dict, words: list[dict], status):
             f"LLM readability: words {offset + 1}–{offset + len(chunk)} / {len(words)}"
         )
         data = _edit_request(speakers, words, offset)
-        accepted, rejection = _edit_chunk(client, data, chunk)
-        if rejection is not None:
+        try:
+            accepted = _edit_chunk(client, data, chunk)
+        except INVALID_RESPONSE_ERRORS as rejection:
             rejected += 1
             status(
                 f"Editor response rejected twice ({rejection}); "
                 "original text retained and flagged."
             )
+            accepted = _fallback_paragraphs(chunk, rejection)
         paragraphs.extend(accepted)
     return paragraphs, rejected
 
@@ -391,9 +402,9 @@ def _compact(word: dict) -> dict:
     return {
         "id": word["word_id"],
         "t": word["text"],
-        "s": word.get("speaker"),
-        "u": word.get("uncertain", False),
-        "o": word.get("overlap", False),
+        "s": word["speaker"],
+        "u": word["uncertain"],
+        "o": word["overlap"],
         "time": [round(word["start"], 3), round(word["end"], 3)],
     }
 
@@ -414,26 +425,27 @@ def _edit_request(speakers: dict, words: list[dict], offset: int) -> dict:
     }
 
 
-def _edit_chunk(client, data: dict, chunk: list[dict]):
-    """Edited paragraphs for a chunk, or its original wording after two rejections.
+def _edit_chunk(client: OllamaClient, data: dict, chunk: list[dict]) -> list[dict]:
+    """Edited paragraphs for a chunk; a rejected attempt is retried with its error.
 
-    Returns:
-        The paragraphs and the last rejection, which is None when an edit passed.
+    Raises:
+        ValueError, KeyError or TypeError: The last attempt was rejected as well.
     """
-    error = None
-    for _ in range(EDIT_ATTEMPTS):
+    for _ in range(EDIT_ATTEMPTS - 1):
         try:
-            if error:
-                data["validation_error"] = (
-                    str(error)[:MAX_FEEDBACK_CHARS]
-                    + " Return a corrected complete response."
-                )
-            schema = _edit_schema(data["speakers"])
-            edited = client.chat(EDIT_PROMPT, data, schema)
-            return _validate_edit(edited, chunk, data["speakers"]), None
-        except (ValueError, KeyError, TypeError) as exc:
-            error = exc
-    return _fallback_paragraphs(chunk, error), error
+            return _edit_attempt(client, data, chunk)
+        except INVALID_RESPONSE_ERRORS as rejection:
+            data["validation_error"] = (
+                str(rejection)[:MAX_FEEDBACK_CHARS]
+                + " Return a corrected complete response."
+            )
+    return _edit_attempt(client, data, chunk)
+
+
+def _edit_attempt(client: OllamaClient, data: dict, chunk: list[dict]) -> list[dict]:
+    schema = _edit_schema(data["speakers"])
+    edited = client.chat(EDIT_PROMPT, data, schema)
+    return _validate_edit(edited, chunk, data["speakers"])
 
 
 def _edit_schema(speakers: dict) -> dict:
@@ -443,7 +455,9 @@ def _edit_schema(speakers: dict) -> dict:
     return schema
 
 
-def _validate_edit(response: dict, words: list[dict], speakers) -> list[dict]:
+def _validate_edit(
+    response: dict, words: list[dict], speakers: Collection[str | None]
+) -> list[dict]:
     """Accept edited paragraphs only if they cover every word once, in order.
 
     The words are one chunk of consecutive source word IDs.
@@ -483,7 +497,7 @@ def _word_range(paragraph: dict) -> tuple[int, int]:
     return first, last
 
 
-def _check_paragraph_content(paragraph: dict, speakers) -> None:
+def _check_paragraph_content(paragraph: dict, speakers: Collection[str | None]) -> None:
     speaker = paragraph.get("speaker")
     if speaker is not None and speaker not in speakers:
         raise ValueError("The editor introduced an unknown speaker.")
@@ -546,7 +560,7 @@ def _source_span(words: list[dict]) -> dict:
         "end": end,
         "source_word_ids": [w["word_id"] for w in words],
         "source_text": _joined_text(words),
-        "overlap": any(w.get("overlap", False) for w in words),
+        "overlap": any(w["overlap"] for w in words),
     }
 
 
@@ -559,7 +573,7 @@ def _joined_text(words: list[dict]) -> str:
 
 
 def _source_reasons(words: list[dict]) -> list[str]:
-    return sorted({r for w in words for r in w.get("uncertainty_reasons", [])})
+    return sorted({r for w in words for r in w["uncertainty_reasons"]})
 
 
 def _similarity(original: str, edited: str) -> float:
@@ -573,19 +587,19 @@ def _wording_changed(original: str, edited: str) -> bool:
     return _tokens(original) != _tokens(edited)
 
 
-def _speaker_changed(words: list[dict], speaker) -> bool:
-    return any(w.get("speaker") != speaker for w in words)
+def _speaker_changed(words: list[dict], speaker: str | None) -> bool:
+    return any(w["speaker"] != speaker for w in words)
 
 
 def _source_flagged(words: list[dict]) -> bool:
     """Source uncertainty or overlap that no edit or review may clear."""
-    return any(w.get("uncertain") or w.get("overlap") for w in words)
+    return any(w["uncertain"] or w["overlap"] for w in words)
 
 
 def _fallback_paragraphs(words: list[dict], reason: Exception) -> list[dict]:
     """Original wording per speaker run, flagged as a rejected edit."""
     response = {"paragraphs": [_original_wording(run) for run in _speaker_runs(words)]}
-    result = _validate_edit(response, words, {w.get("speaker") for w in words})
+    result = _validate_edit(response, words, {w["speaker"] for w in words})
     for p in result:
         p["uncertainty_reasons"].append("editor_output_rejected")
         p["editor_error"] = str(reason)[:MAX_STORED_MESSAGE_CHARS]
@@ -596,7 +610,7 @@ def _speaker_runs(words: list[dict]) -> list[list[dict]]:
     """Consecutive words grouped while the speaker stays the same."""
     runs = []
     for w in words:
-        if runs and runs[-1][-1].get("speaker") == w.get("speaker"):
+        if runs and runs[-1][-1]["speaker"] == w["speaker"]:
             runs[-1].append(w)
         else:
             runs.append([w])
@@ -608,7 +622,7 @@ def _original_wording(run: list[dict]) -> dict:
     return {
         "first_word": run[0]["word_id"],
         "last_word": run[-1]["word_id"],
-        "speaker": run[0].get("speaker"),
+        "speaker": run[0]["speaker"],
         "text": _joined_text(run) or "…",
         "uncertain": True,
         "reason": "Editor response rejected; original wording retained.",
@@ -702,7 +716,7 @@ def _paragraph_source(paragraph: dict, words: list[dict]) -> list[dict]:
     return selected
 
 
-def _apply_review(client, paragraph: dict, selected: list[dict]) -> None:
+def _apply_review(client: OllamaClient, paragraph: dict, selected: list[dict]) -> None:
     """Record the reviewer verdict, then re-derive the flags it must not clear."""
     paragraph.update(_review_verdict(client, paragraph, selected))
     # The same model agreeing with its edit must never erase source flags.
@@ -720,13 +734,15 @@ def _apply_review(client, paragraph: dict, selected: list[dict]) -> None:
     paragraph["uncertain"] = any(flags)
 
 
-def _review_verdict(client, paragraph: dict, selected: list[dict]) -> dict:
+def _review_verdict(
+    client: OllamaClient, paragraph: dict, selected: list[dict]
+) -> dict:
     """The reviewer's verdict fields; an invalid response requires manual review."""
     data = _review_request(paragraph, selected)
     try:
         response = client.chat(REVIEW_PROMPT, data, REVIEW_SCHEMA)
         verdict = _validated_review(response, paragraph["paragraph_id"])
-    except (ValueError, KeyError, TypeError):
+    except INVALID_RESPONSE_ERRORS:
         return {
             "review_uncertain": True,
             "review_reasons": ["Invalid model review; manual review required."],

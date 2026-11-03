@@ -35,7 +35,9 @@ WORKSPACE_PREFIX = "interview-local-"
 REQUESTED_SPEAKERS = 2
 
 
-def transcribe(source: Path, status: Callable, offline: bool, output_dir: Path) -> dict:
+def transcribe(
+    source: Path, status: Callable[[str], None], offline: bool, output_dir: Path
+) -> dict:
     """Stage 1 only: speech recognition without diarization, LLM or HF account.
 
     Args:
@@ -56,11 +58,11 @@ def transcribe(source: Path, status: Callable, offline: bool, output_dir: Path) 
 
 def process(
     source: Path,
-    status=print,
-    token=None,
-    offline=False,
-    alignment=False,
-    output_dir: Path | None = None,
+    status: Callable[[str], None],
+    token: str | None,
+    offline: bool,
+    alignment: bool,
+    output_dir: Path,
 ) -> dict:
     """Speech recognition, then two-speaker attribution, saving each stage.
 
@@ -70,14 +72,13 @@ def process(
         token: Hugging Face read token for community-1, if needed.
         offline: Use local model caches only.
         alignment: Run the optional German word alignment.
-        output_dir: Directory for the stage files; None keeps nothing on disk.
+        output_dir: Directory for the stage files.
 
     Returns:
         The speaker-attributed transcript (stage 2).
     """
     source = _checked_audio(source)
-    if output_dir is not None:
-        output_dir = _open_output(output_dir)
+    output_dir = _open_output(output_dir)
     with tempfile.TemporaryDirectory(prefix=WORKSPACE_PREFIX) as directory:
         run = _Run(Path(directory), status, token, offline, output_dir)
         raw = _recognize_speech(source, run)
@@ -92,22 +93,28 @@ def process(
         result["metadata"] = _metadata(
             source, words, alignment, len(result["speakers"])
         )
-        if output_dir is not None:
-            save_speakers(result, output_dir)
+        save_speakers(result, output_dir)
         return result
 
 
-def prepare(status=print, token=None, alignment=False) -> None:
+def prepare(status: Callable[[str], None], token: str | None, alignment: bool) -> None:
     """Download or verify the speech models, one worker process per model."""
     stages = ["prepare-diarize", "prepare-asr"]
     if alignment:
         stages.append("prepare-align")
     for stage in stages:
         status(f"Model download / loading check: {stage}")
-        worker(stage, Path("."), Path("."), status, token)
+        worker(stage, Path("."), Path("."), status, token, offline=False)
 
 
-def worker(stage, source, target, status=print, token=None, offline=False) -> None:
+def worker(
+    stage: str,
+    source: Path,
+    target: Path,
+    status: Callable[[str], None],
+    token: str | None,
+    offline: bool,
+) -> None:
     """Run one stage in a fresh process so its model memory is released on exit.
 
     Raises:
@@ -147,10 +154,10 @@ class _Run:
     """One processing run: its temporary workspace and worker settings."""
 
     work: Path
-    status: Callable
+    status: Callable[[str], None]
     token: str | None
     offline: bool
-    output_dir: Path | None
+    output_dir: Path
 
     @property
     def audio(self) -> Path:
@@ -171,7 +178,6 @@ def _checked_audio(source: Path) -> Path:
 
 def _open_output(output_dir: Path) -> Path:
     """Create the output directory; refuse one that already holds stage files."""
-    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if any((output_dir / name).exists() for name in COMPLETED_STAGE_FILES):
         raise ValueError(
@@ -191,10 +197,9 @@ def _recognize_speech(source: Path, run: _Run) -> dict:
         run.stage(stage, src, dst)
     transcript = _read_json(asr_output)
     raw = dict(schema_version=2, stage="raw", source=source.name, **transcript)
-    if run.output_dir is not None:
-        save_raw(raw, run.output_dir)
-        saved = run.output_dir / "01_raw.txt"
-        run.status(f"Original speech recognition output saved: {saved}")
+    save_raw(raw, run.output_dir)
+    saved = run.output_dir / "01_raw.txt"
+    run.status(f"Original speech recognition output saved: {saved}")
     return raw
 
 
@@ -256,7 +261,9 @@ def _worker_environment(token: str | None, offline: bool) -> dict:
     return env
 
 
-def _relayed_output(lines, status: Callable, secret: str | None) -> list[str]:
+def _relayed_output(
+    lines, status: Callable[[str], None], secret: str | None
+) -> list[str]:
     """Forward progress lines with the token redacted; return the last lines."""
     tail = []
     for line in lines:

@@ -31,7 +31,7 @@ def save_speakers_with_aliases(result: dict, directory: Path) -> None:
 
 def save_readable(result: dict, directory: Path) -> None:
     """Save a readable draft as 03_readable.*, or a reviewed one as 04_review.*."""
-    prefix = "04_review" if result.get("stage") == "review" else "03_readable"
+    prefix = "04_review" if result["stage"] == "review" else "03_readable"
     _save_json(directory / f"{prefix}.json", result)
     (directory / f"{prefix}.txt").write_text(readable_text(result), encoding="utf-8")
     (directory / f"{prefix}.md").write_text(readable_markdown(result), encoding="utf-8")
@@ -48,18 +48,18 @@ def readable_markdown(result: dict) -> str:
 
 
 def _readable_document(result: dict, title_marker: str, heading_marker: str) -> str:
-    reviewed = result.get("stage") == "review"
+    reviewed = result["stage"] == "review"
     lines = [title_marker + _document_title(result), "", DRAFT_NOTICE, ""]
     for p in result["paragraphs"]:
         lines += [heading_marker + _paragraph_heading(result["speakers"], p), ""]
         lines += [p["text"], ""]
-        if reviewed and p.get("review_reasons"):
+        if reviewed and p["review_reasons"]:
             lines += ["Review: " + "; ".join(p["review_reasons"]), ""]
     return "\n".join(lines)
 
 
 def _document_title(result: dict) -> str:
-    if result.get("stage") == "review":
+    if result["stage"] == "review":
         return "Reviewed transcript"
     return "Readable transcript — LLM draft"
 

@@ -1,5 +1,6 @@
 import copy
 import unittest
+from unittest.mock import patch
 
 from fake_ollama import FakeClient
 
@@ -14,29 +15,43 @@ def silent(_message):
 
 
 def two_word_source():
-    return merge([Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")], [Turn(0, 1, "s")])
+    return merge(
+        [Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")], [Turn(0, 1, "s")], []
+    )
 
 
 def counted_source(count):
     words = [Word(i * 0.1, i * 0.1 + 0.05, f"w{i}") for i in range(count)]
-    return merge(words, [Turn(0, count, "s")])
+    return merge(words, [Turn(0, count, "s")], [])
 
 
 def ten_word_source():
     text = "one two three four five six seven eight nine ten"
     words = [Word(i, i + 0.5, t) for i, t in enumerate(text.split())]
-    return merge(words, [Turn(0, 11, "s")])
+    return merge(words, [Turn(0, 11, "s")], [])
 
 
 def two_speaker_source():
     return merge(
         [Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")],
         [Turn(0, 0.3, "s"), Turn(0.3, 1, "t")],
+        [],
     )
 
 
+def served_by(client):
+    """Answer every local-model request of the code under test from client."""
+    return patch("interview_local.llm.OllamaClient", lambda: client)
+
+
 def edited(source, client=None):
-    return enhance(source, client=client or FakeClient(), status=silent)
+    with served_by(client or FakeClient()):
+        return enhance(source, silent)
+
+
+def reviewed(draft, client=None):
+    with served_by(client or FakeClient()):
+        return review(draft, silent)
 
 
 def rejected_chunks(client, source=None):
@@ -44,9 +59,7 @@ def rejected_chunks(client, source=None):
 
 
 def reviewed_paragraph(client):
-    return review(edited(two_word_source()), client=client, status=silent)[
-        "paragraphs"
-    ][0]
+    return reviewed(edited(two_word_source()), client)["paragraphs"][0]
 
 
 class EmptyEdit(FakeClient):
@@ -95,7 +108,8 @@ class EditTests(unittest.TestCase):
 
     def test_long_source_is_edited_in_chunks_of_120_words(self):
         messages = []
-        enhance(counted_source(130), client=FakeClient(), status=messages.append)
+        with served_by(FakeClient()):
+            enhance(counted_source(130), messages.append)
         self.assertEqual(
             [m for m in messages if m.startswith("LLM readability")],
             [
@@ -118,6 +132,7 @@ class EditTests(unittest.TestCase):
         source = merge(
             [Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")],
             [Turn(0, 1, "s"), Turn(1, 2, "t")],
+            [],
         )
         paragraph = edited(source, FakeClient(speaker="B"))["paragraphs"][0]
         self.assertEqual(
@@ -144,6 +159,7 @@ class EditTests(unittest.TestCase):
         source = merge(
             [Word(0, 0.3, "Hello", "estimated"), Word(0.3, 0.7, "there.")],
             [Turn(0, 1, "s")],
+            [],
         )
         paragraph = edited(source)["paragraphs"][0]
         self.assertEqual(
@@ -267,11 +283,11 @@ class ReviewTests(unittest.TestCase):
     def test_review_never_erases_source_uncertainty(self):
         source = two_word_source()
         source["words"][0]["uncertain"] = True
-        checked = review(edited(source), client=FakeClient(), status=silent)
+        checked = reviewed(edited(source))
         self.assertTrue(checked["paragraphs"][0]["uncertain"])
 
     def test_review_records_the_reviewer_verdict(self):
-        checked = review(edited(two_word_source()), FakeClient(), status=silent)
+        checked = reviewed(edited(two_word_source()))
         paragraph = checked["paragraphs"][0]
         self.assertEqual(
             (
@@ -283,7 +299,7 @@ class ReviewTests(unittest.TestCase):
         )
 
     def test_review_is_marked_as_source_comparison_only(self):
-        checked = review(edited(two_word_source()), FakeClient(), status=silent)
+        checked = reviewed(edited(two_word_source()))
         self.assertEqual(
             checked["metadata"]["verification"],
             "source_comparison_only_not_audio_verified",
@@ -291,7 +307,7 @@ class ReviewTests(unittest.TestCase):
 
     def test_invalid_review_response_requires_manual_review(self):
         client = FakeClient(review_id_offset=1)
-        checked = review(edited(two_word_source()), client, status=silent)
+        checked = reviewed(edited(two_word_source()), client)
         paragraph = checked["paragraphs"][0]
         self.assertEqual(
             (
@@ -309,7 +325,7 @@ class ReviewTests(unittest.TestCase):
     def test_wording_change_stays_uncertain_when_reviewer_agrees(self):
         changed = "one two three four five six seven eight nine"
         draft = edited(ten_word_source(), FakeClient(wording=changed))
-        checked = review(draft, client=FakeClient(), status=silent)
+        checked = reviewed(draft)
         self.assertTrue(checked["paragraphs"][0]["uncertain"])
 
     def test_review_with_malformed_verdict_requires_manual_review(self):
@@ -341,7 +357,7 @@ class ReviewTests(unittest.TestCase):
 
     def test_review_records_the_reviewed_edit_and_reviewer(self):
         draft = edited(two_word_source())
-        metadata = review(draft, client=FakeClient(), status=silent)["metadata"]
+        metadata = reviewed(draft)["metadata"]
         self.assertEqual(
             (metadata["reviewer"], len(metadata["reviewed_edit_sha256"])),
             ({"model": "fake-local-test"}, 64),
@@ -351,29 +367,29 @@ class ReviewTests(unittest.TestCase):
         draft = edited(two_word_source())
         del draft["source_transcript"]
         with self.assertRaises(ValueError):
-            review(draft, client=FakeClient(), status=silent)
+            reviewed(draft)
 
     def test_review_requires_a_readable_stage(self):
         with self.assertRaises(ValueError):
-            review({"stage": "speakers"}, client=FakeClient(), status=silent)
+            reviewed({"stage": "speakers"})
 
     def test_review_rejects_a_modified_embedded_source(self):
         draft = edited(two_word_source())
         draft["source_transcript"]["words"][0]["text"] = "changed"
         with self.assertRaises(ValueError):
-            review(draft, client=FakeClient(), status=silent)
+            reviewed(draft)
 
     def test_review_rejects_duplicate_word_coverage(self):
         draft = edited(two_word_source())
         draft["paragraphs"][0]["source_word_ids"] = [0, 0]
         with self.assertRaises(ValueError):
-            review(draft, client=FakeClient(), status=silent)
+            reviewed(draft)
 
     def test_review_rejects_a_paragraph_whose_source_text_changed(self):
         draft = edited(two_word_source())
         draft["paragraphs"][0]["source_text"] = "Hello here."
         with self.assertRaises(ValueError):
-            review(draft, client=FakeClient(), status=silent)
+            reviewed(draft)
 
 
 if __name__ == "__main__":

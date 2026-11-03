@@ -23,68 +23,70 @@ def overlapping_interview():
 
 class SpeakerAssignmentTests(unittest.TestCase):
     def test_each_word_takes_the_speaker_of_its_most_overlapping_turn(self):
-        result = merge(GREETING_WORDS, GREETING_TURNS)
+        result = merge(GREETING_WORDS, GREETING_TURNS, [])
         speakers = [w["speaker"] for w in result["words"]]
         self.assertEqual(speakers, ["A", "A", "B", None])
 
     def test_speakers_are_lettered_in_order_of_their_first_turn(self):
-        result = merge(GREETING_WORDS, GREETING_TURNS)
+        result = merge(GREETING_WORDS, GREETING_TURNS, [])
         self.assertEqual(result["speakers"], {"A": "Speaker A", "B": "Speaker B"})
 
     def test_word_outside_every_turn_is_uncertain(self):
-        result = merge([Word(5, 5.2, "Echo")], GREETING_TURNS)
+        result = merge([Word(5, 5.2, "Echo")], GREETING_TURNS, [])
         reasons = result["words"][0]["uncertainty_reasons"]
         self.assertEqual(reasons, ["no_matching_speaker"])
 
     def test_near_tie_between_two_turns_is_flagged_ambiguous(self):
-        result = merge([Word(0.5, 1.5, "Ja")], NEIGHBOURING_TURNS)
+        result = merge([Word(0.5, 1.5, "Ja")], NEIGHBOURING_TURNS, [])
         reasons = result["words"][0]["uncertainty_reasons"]
         self.assertEqual(reasons, ["ambiguous_speaker_boundary"])
 
     def test_zero_length_word_goes_to_the_turn_containing_it(self):
-        result = merge([Word(1, 1, "42")], NEIGHBOURING_TURNS)
+        result = merge([Word(1, 1, "42")], NEIGHBOURING_TURNS, [])
         self.assertEqual(result["words"][0]["speaker"], "B")
 
     def test_zero_length_estimated_word_is_uncertain(self):
-        result = merge([Word(1, 1, "42", "estimated")], NEIGHBOURING_TURNS)
+        result = merge([Word(1, 1, "42", "estimated")], NEIGHBOURING_TURNS, [])
         reasons = result["words"][0]["uncertainty_reasons"]
         self.assertEqual(
             reasons, ["invalid_word_duration", "estimated_or_fallback_timing"]
         )
 
     def test_empty_input_produces_no_segments(self):
-        self.assertEqual(merge([], [])["segments"], [])
+        self.assertEqual(merge([], [], [])["segments"], [])
 
     def test_speaker_heard_only_in_overlap_gets_the_next_letter(self):
         result = merge([], [Turn(0, 1, "x")], [Turn(0, 1, "x"), Turn(0.5, 2, "y")])
         self.assertEqual(result["speakers"], {"A": "Speaker A", "B": "Speaker B"})
 
     def test_reliable_word_inside_one_turn_is_certain(self):
-        result = merge([Word(0.2, 0.6, "Guten")], GREETING_TURNS)
+        result = merge([Word(0.2, 0.6, "Guten")], GREETING_TURNS, [])
         word = result["words"][0]
         self.assertEqual((word["uncertain"], word["uncertainty_reasons"]), (False, []))
 
 
 class SegmentTests(unittest.TestCase):
     def test_consecutive_words_of_one_speaker_form_one_segment(self):
-        result = merge(GREETING_WORDS, GREETING_TURNS)
+        result = merge(GREETING_WORDS, GREETING_TURNS, [])
         texts = [s["text"] for s in result["segments"]]
         self.assertEqual(texts, ["Guten Tag.", "Hallo!", "Echo"])
 
     def test_pause_of_one_and_a_half_seconds_starts_a_new_segment(self):
-        result = merge([Word(0, 1, "eins"), Word(2.5, 3, "zwei")], [Turn(0, 4, "x")])
+        result = merge(
+            [Word(0, 1, "eins"), Word(2.5, 3, "zwei")], [Turn(0, 4, "x")], []
+        )
         texts = [s["text"] for s in result["segments"]]
         self.assertEqual(texts, ["eins", "zwei"])
 
     def test_segment_is_closed_once_it_would_reach_thirty_five_seconds(self):
         words = [Word(i, i + 0.5, f"w{i}") for i in range(37)]
-        result = merge(words, [Turn(0, 40, "x")])
+        result = merge(words, [Turn(0, 40, "x")], [])
         sizes = [len(s["word_ids"]) for s in result["segments"]]
         self.assertEqual(sizes, [35, 2])
 
     def test_word_without_text_is_left_out_of_segments(self):
         words = [Word(0, 0.5, "eins"), Word(0.5, 0.6, " "), Word(0.6, 1, "zwei")]
-        result = merge(words, [Turn(0, 2, "x")])
+        result = merge(words, [Turn(0, 2, "x")], [])
         self.assertEqual(
             [(s["text"], s["word_ids"]) for s in result["segments"]],
             [("eins zwei", [0, 2])],
@@ -92,7 +94,7 @@ class SegmentTests(unittest.TestCase):
 
     def test_segment_is_flagged_if_any_of_its_words_is(self):
         words = [Word(0, 0.5, "eins"), Word(0.5, 1, "zwei", "estimated")]
-        segment = merge(words, [Turn(0, 2, "x")])["segments"][0]
+        segment = merge(words, [Turn(0, 2, "x")], [])["segments"][0]
         self.assertEqual((segment["uncertain"], segment["overlap"]), (True, False))
 
 
@@ -147,7 +149,7 @@ class OverlapTests(unittest.TestCase):
         self.assertEqual(overlap_regions(turns, {"x": "A", "y": "B"}), [])
 
     def test_missing_regular_turns_mark_overlap_detection_unavailable(self):
-        self.assertFalse(merge([], [])["overlap_detection_available"])
+        self.assertFalse(merge([], [], None)["overlap_detection_available"])
 
 
 class TimestampTests(unittest.TestCase):
