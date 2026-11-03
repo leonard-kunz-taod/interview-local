@@ -25,7 +25,9 @@ def launch():
     root.title("Interview Local · German · local processing")
     root.geometry("1000x820")
     events = queue.Queue()
+    # pragma: no mutate start -- only the truthiness of running is read
     running = False
+    # pragma: no mutate end
     output = None
     path = tk.StringVar()
     name_a = tk.StringVar(value="Speaker A")
@@ -100,7 +102,9 @@ def launch():
         def job():
             try:
                 function()
+                # pragma: no mutate start -- every kind but status and error finishes the job as done
                 events.put(("done", None))
+                # pragma: no mutate end
             except Exception as exc:
                 events.put(("error", str(exc)))
 
@@ -187,7 +191,9 @@ def launch():
             lambda: submit(lambda: OllamaClient().prepare(progress)),
         ),
     ):
+        # pragma: no mutate start -- the parent only places the button within the layout
         button = ttk.Button(buttons, text=label, command=action)
+        # pragma: no mutate end
         button.pack(side="left", padx=(0, 8))
         controls.append(button)
 
@@ -205,7 +211,9 @@ def launch():
 
     def finish_job(kind, payload):
         nonlocal running
+        # pragma: no mutate start -- only the truthiness of running is read
         running = False
+        # pragma: no mutate end
         token.set("")
         set_controls("normal")
         refresh_views()

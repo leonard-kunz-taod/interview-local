@@ -64,7 +64,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Optional German WhisperX alignment",
     )
+    # pragma: no mutate start -- alignment already defaults to False, so storing False under any name changes nothing
     alignment.add_argument("--no-align", dest="alignment", action="store_false")
+    # pragma: no mutate end
     parser.set_defaults(alignment=False)
     parser.add_argument("--name-a", default="Speaker A")
     parser.add_argument("--name-b", default="Speaker B")

@@ -5,14 +5,14 @@ import json
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fake_ollama import FakeClient
-from fake_tk import FakeScreen
-from test_pipeline import OUTPUTS, FakeWorker
+from support.fake_ollama import FakeOllama, served_by
+from support.fake_tk import FakeScreen
+from support.fake_worker import SPOKEN_OUTPUTS, FakeWorker
+from support.platform_encoding import windows_default_encoding
 
 import interview_local
 from interview_local.core import Turn, Word, merge
@@ -22,20 +22,11 @@ PROCESS = "Process and save stages …"
 COMPARE = "Compare readable draft …"
 PREPARE = "Download / prepare Ministral"
 CHOOSE = "Choose audio file …"
+OFFLINE = "Offline speech models (download caches first)"
+ALIGNMENT = "Additional German word alignment (optional)"
 USE_LLM = "Create a readable draft with local Ministral"
 LONG_MESSAGE = "x" * 600 + "end"
-POLL_ATTEMPTS = 500
-
-
-class BlockingClient(FakeClient):
-    """Reports a long progress message, then prepares only once released."""
-
-    release = threading.Event()
-
-    def prepare(self, status):
-        status(LONG_MESSAGE)
-        BlockingClient.release.wait()
-        return super().prepare(status)
+TIMESTAMP = r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{6}"
 
 
 class WindowTestCase(unittest.TestCase):
@@ -47,14 +38,16 @@ class WindowTestCase(unittest.TestCase):
         stack.callback(vars(interview_local).pop, "gui", None)
         sys.modules.pop("interview_local.gui", None)
         self.gui = importlib.import_module("interview_local.gui")
-        stack.enter_context(patch.object(self.gui, "OllamaClient", FakeClient))
-        stack.enter_context(patch("interview_local.llm.OllamaClient", FakeClient))
-        self.worker = FakeWorker(OUTPUTS)
+        self.service = stack.enter_context(served_by(self.local_service()))
+        self.worker = FakeWorker(SPOKEN_OUTPUTS)
         stack.enter_context(patch("interview_local.pipeline.worker", self.worker))
         self.directory = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.audio = self.directory / "interview.wav"
         self.audio.touch()
         self.gui.launch()
+
+    def local_service(self):
+        return FakeOllama()
 
     def process_audio(self):
         """Run the full process for the test recording; return its output folder."""
@@ -63,6 +56,9 @@ class WindowTestCase(unittest.TestCase):
         self.screen.press(PROCESS)
         self.screen.settle()
         return next(self.directory.glob("interview_*"))
+
+    def saved_speakers(self, output):
+        return json.loads((output / "02_speakers.json").read_text("utf-8"))["speakers"]
 
 
 class FileChoiceTests(WindowTestCase):
@@ -97,6 +93,10 @@ class ProcessingTests(WindowTestCase):
         output = self.process_audio()
         self.assertEqual(self.screen.status(), f"Done. Saved stages: {output}")
 
+    def test_run_folder_is_named_with_its_start_time(self):
+        output = self.process_audio()
+        self.assertRegex(output.name, f"^interview_{TIMESTAMP}$")
+
     def test_processing_shows_every_saved_stage(self):
         output = self.process_audio()
         shown = {label: self.screen.view(label) for label in ("Raw", "Speakers")}
@@ -107,6 +107,11 @@ class ProcessingTests(WindowTestCase):
                 "Speakers": (output / "02_speakers.txt").read_text(encoding="utf-8"),
             },
         )
+
+    def test_german_stages_are_shown_where_the_platform_default_is_not_utf8(self):
+        with windows_default_encoding():
+            self.process_audio()
+        self.assertIn("\nGrüße\n", self.screen.view("Raw"))
 
     def test_processing_creates_a_readable_draft(self):
         self.process_audio()
@@ -119,8 +124,20 @@ class ProcessingTests(WindowTestCase):
         entries[2].set(" Änne ")
         entries[3].set("")
         output = self.process_audio()
-        saved = json.loads((output / "02_speakers.json").read_text("utf-8"))
-        self.assertEqual(saved["speakers"], {"A": "Änne", "B": "Speaker B"})
+        self.assertEqual(self.saved_speakers(output), {"A": "Änne", "B": "Speaker B"})
+
+    def test_blank_first_name_keeps_its_default(self):
+        entries = self.screen.entries()
+        entries[2].set(" ")
+        entries[3].set("Bernd")
+        output = self.process_audio()
+        self.assertEqual(self.saved_speakers(output), {"A": "Speaker A", "B": "Bernd"})
+
+    def test_untouched_names_are_saved_as_the_default_speakers(self):
+        output = self.process_audio()
+        self.assertEqual(
+            self.saved_speakers(output), {"A": "Speaker A", "B": "Speaker B"}
+        )
 
     def test_entered_token_reaches_the_speech_workers(self):
         self.screen.entries()[1].set(" hf_entered ")
@@ -135,6 +152,16 @@ class ProcessingTests(WindowTestCase):
         self.screen.entries()[1].set("hf_entered")
         self.process_audio()
         self.assertEqual(self.screen.entries()[1].get(), "")
+
+    def test_offline_option_runs_every_worker_offline(self):
+        self.screen.option(OFFLINE).set(True)
+        self.process_audio()
+        self.assertEqual(self.worker.offline, {True})
+
+    def test_alignment_option_aligns_the_words(self):
+        self.screen.option(ALIGNMENT).set(True)
+        self.process_audio()
+        self.assertIn("align", self.worker.stages)
 
     def test_readable_draft_is_skipped_without_the_llm(self):
         self.screen.option(USE_LLM).set(False)
@@ -157,6 +184,11 @@ class ProcessingTests(WindowTestCase):
             ),
         )
 
+    def test_second_run_starts_once_the_first_has_finished(self):
+        self.process_audio()
+        self.process_audio()
+        self.assertEqual(len(list(self.directory.glob("interview_*"))), 2)
+
     def test_new_run_clears_the_previous_views(self):
         self.process_audio()
         self.screen.option(USE_LLM).set(False)
@@ -165,28 +197,40 @@ class ProcessingTests(WindowTestCase):
 
 
 class ComparisonTests(WindowTestCase):
-    def saved_draft(self):
-        speakers = merge([Word(0, 0.5, "Hallo")], [Turn(0, 1, "s")], [])
+    def saved_draft(self, word="Hallo"):
+        speakers = merge([Word(0, 0.5, word)], [Turn(0, 1, "s")], [])
         draft = enhance(speakers, lambda _: None)
         path = self.directory / "03_readable.json"
-        path.write_text(json.dumps(draft), encoding="utf-8")
+        path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
         return path
 
-    def test_comparison_shows_the_review(self):
-        self.screen.chosen_files.append(str(self.saved_draft()))
+    def compare(self, draft):
+        self.screen.chosen_files.append(str(draft))
         self.screen.press(COMPARE)
         self.screen.settle()
+
+    def test_comparison_shows_the_review(self):
+        self.compare(self.saved_draft())
         self.assertTrue(self.screen.view("Review").startswith("Reviewed transcript"))
 
     def test_comparison_is_saved_next_to_the_draft(self):
-        self.screen.chosen_files.append(str(self.saved_draft()))
-        self.screen.press(COMPARE)
-        self.screen.settle()
+        self.compare(self.saved_draft())
         review = next(self.directory.glob("review_*"))
         self.assertEqual(
             sorted(p.name for p in review.iterdir()),
             ["04_review.json", "04_review.md", "04_review.txt"],
         )
+
+    def test_comparison_folder_is_named_with_its_start_time(self):
+        self.compare(self.saved_draft())
+        review = next(self.directory.glob("review_*"))
+        self.assertRegex(review.name, f"^review_{TIMESTAMP}$")
+
+    def test_german_draft_is_compared_where_the_platform_default_is_not_utf8(self):
+        draft = self.saved_draft(word="Grüße")
+        with windows_default_encoding():
+            self.compare(draft)
+        self.assertIn("\nGrüße\n", self.screen.view("Review"))
 
     def test_cancelled_comparison_starts_nothing(self):
         self.screen.chosen_files.append("")
@@ -209,15 +253,20 @@ class PreparationTests(WindowTestCase):
 
 
 class RunningJobTests(WindowTestCase):
+    """A model download that reports a long message, then stalls until released."""
+
+    def local_service(self):
+        self.release = threading.Event()
+        updates = ({"status": LONG_MESSAGE}, {"status": "success"})
+        return FakeOllama(pull_updates=updates, pull_gate=self.release)
+
     def setUp(self):
         super().setUp()
-        BlockingClient.release.clear()
         self.addCleanup(self.finish)
-        with patch.object(self.gui, "OllamaClient", BlockingClient):
-            self.screen.press(PREPARE)
+        self.screen.press(PREPARE)
 
     def finish(self):
-        BlockingClient.release.set()
+        self.release.set()
         self.screen.settle()
 
     def test_controls_are_disabled_while_a_job_runs(self):
@@ -232,12 +281,18 @@ class RunningJobTests(WindowTestCase):
         self.assertFalse(self.screen.busy())
 
     def test_progress_shows_the_last_500_characters(self):
-        for _ in range(POLL_ATTEMPTS):
-            self.screen.tick()
-            if self.screen.status() == LONG_MESSAGE[-500:]:
-                break
-            time.sleep(0.01)
-        self.assertEqual(self.screen.status(), LONG_MESSAGE[-500:])
+        last_characters = LONG_MESSAGE[-500:]
+        self.screen.tick_until(lambda: self.screen.status() == last_characters)
+        self.assertEqual(self.screen.status(), last_characters)
+
+    def test_running_job_never_keeps_the_app_from_exiting(self):
+        self.screen.tick_until(lambda: self.screen.status() == LONG_MESSAGE[-500:])
+        blocking = [
+            t
+            for t in threading.enumerate()
+            if t is not threading.main_thread() and not t.daemon
+        ]
+        self.assertEqual(blocking, [])
 
     def test_second_job_is_ignored_while_one_runs(self):
         self.screen.chosen_files.append(str(self.directory / "03_readable.json"))

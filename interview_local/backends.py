@@ -70,7 +70,7 @@ class CommunityDiarizer:
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
-                message=r"\s*torchcodec is not installed correctly.*",
+                message=r"\s*torchcodec is not installed correctly.*",  # pragma: no mutate -- warnings matches message patterns case-insensitively
                 category=UserWarning,
                 module=r"pyannote\.audio\.core\.io",
             )

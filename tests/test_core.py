@@ -64,6 +64,26 @@ class SpeakerAssignmentTests(unittest.TestCase):
         word = result["words"][0]
         self.assertEqual((word["uncertain"], word["uncertainty_reasons"]), (False, []))
 
+    def test_runner_up_overlapping_exactly_eighty_percent_is_ambiguous(self):
+        best_overlap, runner_up_overlap = 2.5, 2.0
+        turns = [Turn(0, best_overlap, "x"), Turn(best_overlap, 5, "y")]
+        word = Word(0, best_overlap + runner_up_overlap, "Ja")
+        reasons = merge([word], turns, [])["words"][0]["uncertainty_reasons"]
+        self.assertEqual(reasons, ["ambiguous_speaker_boundary"])
+
+    def test_clear_majority_turn_is_not_ambiguous(self):
+        result = merge([Word(0.1, 1.1, "Ja")], NEIGHBOURING_TURNS, [])
+        word = result["words"][0]
+        self.assertEqual((word["speaker"], word["uncertainty_reasons"]), ("A", []))
+
+    def test_word_merely_touching_the_end_of_a_turn_is_unassigned(self):
+        result = merge([Word(2, 3, "danach")], [Turn(0, 2, "x")], [])
+        self.assertIsNone(result["words"][0]["speaker"])
+
+    def test_zero_length_word_at_the_end_of_the_only_turn_is_unassigned(self):
+        result = merge([Word(1, 1, "42")], [Turn(0, 1, "x")], [])
+        self.assertIsNone(result["words"][0]["speaker"])
+
 
 class SegmentTests(unittest.TestCase):
     def test_consecutive_words_of_one_speaker_form_one_segment(self):
@@ -96,6 +116,22 @@ class SegmentTests(unittest.TestCase):
         words = [Word(0, 0.5, "eins"), Word(0.5, 1, "zwei", "estimated")]
         segment = merge(words, [Turn(0, 2, "x")], [])["segments"][0]
         self.assertEqual((segment["uncertain"], segment["overlap"]), (True, False))
+
+    def test_segment_keeps_the_flags_of_its_earlier_words(self):
+        words = [Word(0, 0.5, "eins"), Word(0.5, 1, "zwei")]
+        interjection = Turn(0, 0.5, "y")
+        result = merge(words, [Turn(0, 2, "x")], [Turn(0, 2, "x"), interjection])
+        segment = result["segments"][0]
+        self.assertEqual(
+            (segment["word_ids"], segment["uncertain"], segment["overlap"]),
+            ([0, 1], True, True),
+        )
+
+    def test_word_ending_exactly_thirty_five_seconds_after_the_start_is_split(self):
+        words = [Word(i, i + 1, f"w{i}") for i in range(35)]
+        result = merge(words, [Turn(0, 40, "x")], [])
+        sizes = [len(s["word_ids"]) for s in result["segments"]]
+        self.assertEqual(sizes, [34, 1])
 
 
 class OverlapTests(unittest.TestCase):
@@ -151,10 +187,52 @@ class OverlapTests(unittest.TestCase):
     def test_missing_regular_turns_mark_overlap_detection_unavailable(self):
         self.assertFalse(merge([], [], None)["overlap_detection_available"])
 
+    def test_zero_length_word_at_the_start_of_an_overlap_is_flagged(self):
+        result = merge(
+            [Word(1, 1, "ja")],
+            [Turn(0, 1, "first"), Turn(1, 3, "second")],
+            [Turn(0, 1.5, "first"), Turn(1, 3, "second")],
+        )
+        word = result["words"][0]
+        self.assertEqual(
+            (word["overlap"], word["overlap_speakers"]), (True, ["A", "B"])
+        )
+
+    def test_overlap_continues_with_the_longer_of_two_tracks_starting_together(self):
+        turns = [Turn(0, 2, "x"), Turn(0, 1, "x"), Turn(1.5, 3, "y")]
+        self.assertEqual(
+            overlap_regions(turns, {"x": "A", "y": "B"}),
+            [{"start": 1.5, "end": 2, "speakers": ["A", "B"]}],
+        )
+
+
+class TranscriptDocumentTests(unittest.TestCase):
+    def test_transcript_is_german_and_uses_schema_version_two(self):
+        result = merge([], [], [])
+        self.assertEqual((result["schema_version"], result["language"]), (2, "de"))
+
+    def test_both_diarizations_are_kept_with_speaker_letters(self):
+        exclusive = [Turn(0, 1, "x")]
+        regular = [Turn(0, 1, "x"), Turn(0.5, 2, "y")]
+        result = merge([], exclusive, regular)
+        self.assertEqual(
+            (result["diarization"], result["regular_diarization"]),
+            (
+                [{"start": 0, "end": 1, "speaker": "A"}],
+                [
+                    {"start": 0, "end": 1, "speaker": "A"},
+                    {"start": 0.5, "end": 2, "speaker": "B"},
+                ],
+            ),
+        )
+
 
 class TimestampTests(unittest.TestCase):
     def test_rounds_to_milliseconds_across_the_hour(self):
         self.assertEqual(timestamp(3599.9996), "01:00:00.000")
+
+    def test_splits_minutes_seconds_and_milliseconds(self):
+        self.assertEqual(timestamp(61.5), "00:01:01.500")
 
 
 class RenderTests(unittest.TestCase):

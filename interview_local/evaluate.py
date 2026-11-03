@@ -37,10 +37,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     report = score(args.reference, args.hypothesis, args.offset, args.start, args.end)
+    # pragma: no mutate start -- every report key and text is ASCII, so escaping non-ASCII changes nothing
     result = json.dumps(report, ensure_ascii=False, indent=2)
+    # pragma: no mutate end
     print(result)
     if args.output:
+        # pragma: no mutate start -- the report is ASCII, which every platform default and codec spelling writes identically
         args.output.write_text(result, encoding="utf-8")
+        # pragma: no mutate end
 
 
 def score(
@@ -88,7 +92,9 @@ def normalize(text: str) -> list[str]:
     """Lowercase word tokens without punctuation, noise labels or markup."""
     text = re.sub(r"\{[^}]*\}|\[\[[^]]*\]\]|\[[^]]*\]", " ", text)
     text = re.sub(r"<[^>]*>", " ", text)
+    # pragma: no mutate start -- re.UNICODE is already the default for str patterns
     return re.findall(r"[^\W_]+", text.lower(), flags=re.UNICODE)
+    # pragma: no mutate end
 
 
 def distance(reference: list[str], hypothesis: list[str]) -> int:
@@ -166,8 +172,12 @@ def _diarization_error(
 
     ref = _reference_annotation(reference)
     predicted = _clipped_annotation(turns, start, end)
+    # pragma: no mutate start -- skip_overlap=False is pyannote's default and is only read for truthiness
     metric = DiarizationErrorRate(collar=DER_COLLAR_SECONDS, skip_overlap=False)
+    # pragma: no mutate end
+    # pragma: no mutate start -- reference and hypothesis are already clipped to this window
     detail = metric(ref, predicted, uem=Timeline([Segment(start, end)]), detailed=True)
+    # pragma: no mutate end
     return {str(k): float(v) for k, v in detail.items()}
 
 
@@ -186,7 +196,9 @@ def _clipped_annotation(turns: list[dict], start: float, end: float):
 
     annotation = Annotation()
     for i, t in enumerate(turns):
+        # pragma: no mutate start -- the metric's uem crops evaluation to this window anyway
         if t["end"] > start and t["start"] < end:
+            # pragma: no mutate end
             clipped = Segment(max(start, t["start"]), min(end, t["end"]))
             annotation[clipped, i] = t["speaker"]
     return annotation

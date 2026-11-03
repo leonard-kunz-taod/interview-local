@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from support.platform_encoding import windows_default_encoding
+
 from interview_local.artifacts import (
     readable_markdown,
     readable_text,
@@ -31,6 +33,20 @@ REVIEWED = {
     ],
 }
 NOTICE = "Machine-generated draft. Check uncertain passages against the audio."
+ALL_ARTIFACTS = (
+    "01_raw.json",
+    "01_raw.txt",
+    "02_speakers.json",
+    "02_speakers.txt",
+    "transcript.json",
+    "transcript.txt",
+    "03_readable.json",
+    "03_readable.md",
+    "03_readable.txt",
+    "04_review.json",
+    "04_review.md",
+    "04_review.txt",
+)
 
 
 def named_speaker_transcript():
@@ -57,6 +73,43 @@ class RawArtifactTests(unittest.TestCase):
             save_raw(raw, Path(directory))
             saved = (Path(directory) / "01_raw.json").read_text(encoding="utf-8")
         self.assertEqual(json.loads(saved), raw)
+
+    def test_json_is_indented_and_keeps_german_characters_readable(self):
+        raw = {"segments": [{"start": 0, "end": 1, "text": "Grüße"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            save_raw(raw, Path(directory))
+            saved = (Path(directory) / "01_raw.json").read_text(encoding="utf-8")
+        self.assertEqual(
+            saved,
+            '{\n  "segments": [\n    {\n      "start": 0,\n      "end": 1,\n'
+            '      "text": "Grüße"\n    }\n  ]\n}',
+        )
+
+    def test_stages_are_saved_into_a_new_nested_directory(self):
+        raw = {"segments": []}
+        with tempfile.TemporaryDirectory() as directory:
+            nested = Path(directory) / "interviews" / "first"
+            save_raw(raw, nested)
+            saved = sorted(os.listdir(nested))
+        self.assertEqual(saved, ["01_raw.json", "01_raw.txt"])
+
+
+class PlatformEncodingTests(unittest.TestCase):
+    def test_every_artifact_is_utf8_where_the_platform_default_is_not(self):
+        raw = {"segments": [{"start": 0, "end": 1, "text": "Grüße"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run"
+            review = Path(directory) / "review"
+            with windows_default_encoding():
+                save_raw(raw, run)
+                save_speakers_with_aliases(named_speaker_transcript(), run)
+                save_readable(READABLE, run)
+                save_readable(REVIEWED, review)
+            decoded = {
+                path.name: "Grüße" in path.read_bytes().decode("utf-8")
+                for path in [*run.iterdir(), *review.iterdir()]
+            }
+        self.assertEqual(decoded, dict.fromkeys(ALL_ARTIFACTS, True))
 
 
 class ReadableArtifactTests(unittest.TestCase):
@@ -102,6 +155,22 @@ class ReadableArtifactTests(unittest.TestCase):
             save_readable(READABLE, Path(directory))
             markdown = (Path(directory) / "03_readable.md").read_text(encoding="utf-8")
         self.assertEqual(markdown, readable_markdown(READABLE))
+
+    def test_saved_readable_json_holds_the_readable_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_readable(READABLE, Path(directory))
+            saved = (Path(directory) / "03_readable.json").read_text(encoding="utf-8")
+        self.assertEqual(json.loads(saved), READABLE)
+
+    def test_review_reasons_are_separated_by_semicolons(self):
+        paragraph = dict(REVIEWED["paragraphs"][0], review_reasons=["Name?", "Zahl?"])
+        text = readable_text(dict(REVIEWED, paragraphs=[paragraph]))
+        self.assertIn("\nReview: Name?; Zahl?\n", text)
+
+    def test_paragraph_without_speaker_is_headed_unassigned(self):
+        paragraph = dict(PARAGRAPH, speaker=None, uncertain=False, overlap=False)
+        text = readable_text(dict(READABLE, paragraphs=[paragraph]))
+        self.assertIn("\nUnassigned · 00:00:00.000–00:00:02.500\n", text)
 
 
 class SpeakerAliasTests(unittest.TestCase):

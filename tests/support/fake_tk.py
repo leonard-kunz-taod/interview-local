@@ -5,6 +5,7 @@ import types
 
 SETTLE_SECONDS = 10
 NORMAL = "normal"
+TEXT_INDICES = {"1.0", "end"}
 
 
 class FakeScreen:
@@ -78,10 +79,14 @@ class FakeScreen:
 
     def settle(self):
         """Poll the window until every job has finished."""
+        self.tick_until(lambda: not self.busy())
+
+    def tick_until(self, condition):
+        """Poll the window until condition holds; fail once the deadline passes."""
         deadline = time.monotonic() + SETTLE_SECONDS
-        while self.busy():
+        while not condition():
             if time.monotonic() > deadline:
-                raise TimeoutError("The window job did not finish.")
+                raise TimeoutError("The window never reached the awaited state.")
             time.sleep(0.01)
             self.tick()
 
@@ -111,9 +116,12 @@ class FakeScreen:
                 self.tabs[text] = child
 
             def delete(self, start, end):
+                _check_index(start)
+                _check_index(end)
                 self.content = ""
 
             def insert(self, index, text):
+                _check_index(index)
                 self.content = text + self.content
 
         return Widget
@@ -138,6 +146,8 @@ class FakeScreen:
                 self.handlers[name] = handler
 
             def after(self, milliseconds, callback):
+                if type(milliseconds) is not int or milliseconds < 0:
+                    raise ValueError(f"bad delay {milliseconds!r}")
                 self.scheduled = callback
 
             def mainloop(self):
@@ -147,6 +157,12 @@ class FakeScreen:
                 self.destroyed = True
 
         return Window
+
+
+def _check_index(index):
+    """Text widgets accept only the indices the window uses: start and end."""
+    if index not in TEXT_INDICES:
+        raise ValueError(f'bad text index "{index}"')
 
 
 def _variable_class(initial):

@@ -1,9 +1,11 @@
-import contextlib
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from support.model_folders import bundled_local_model, without_local_model
+from support.platform_files import case_sensitive_file_names
 
 from interview_local.models import (
     DIARIZATION_ID,
@@ -17,36 +19,18 @@ def configured(directory):
     return patch.dict(os.environ, {"INTERVIEW_DIARIZATION_MODEL": str(directory)})
 
 
-@contextlib.contextmanager
-def without_local_model():
-    """Neither a configured nor a bundled community-1 folder exists."""
-    with (
-        tempfile.TemporaryDirectory() as directory,
-        patch.dict(os.environ),
-        patch("interview_local.models.BUNDLED_DIARIZATION_MODEL", Path(directory)),
-    ):
-        os.environ.pop("INTERVIEW_DIARIZATION_MODEL", None)
-        yield
-
-
-@contextlib.contextmanager
-def bundled_local_model():
-    """An unconfigured run finds a complete bundled community-1 folder."""
-    with (
-        tempfile.TemporaryDirectory() as directory,
-        patch.dict(os.environ),
-        patch("interview_local.models.BUNDLED_DIARIZATION_MODEL", Path(directory)),
-    ):
-        os.environ.pop("INTERVIEW_DIARIZATION_MODEL", None)
-        (Path(directory) / "config.yaml").touch()
-        yield Path(directory).resolve()
-
-
 class LocalDiarizationModelTests(unittest.TestCase):
     def test_configured_complete_folder_is_used(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "config.yaml").touch()
             with configured(directory):
+                model = local_diarization_model()
+            self.assertEqual(model, Path(directory).resolve())
+
+    def test_configured_folder_is_found_on_a_case_sensitive_file_system(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.yaml").touch()
+            with configured(directory), case_sensitive_file_names():
                 model = local_diarization_model()
             self.assertEqual(model, Path(directory).resolve())
 

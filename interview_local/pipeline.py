@@ -83,7 +83,9 @@ def process(
         run = _Run(Path(directory), status, token, offline, output_dir)
         raw = _recognize_speech(source, run)
         status("Checking local community-1 model / Hugging Face access if needed")
+        # pragma: no mutate start -- the check-access stage reads neither its source nor its target
         run.stage("check-access", source, run.work / "access")
+        # pragma: no mutate end
         words = _aligned_words(run) if alignment else _whisper_words(raw, run)
         turns, regular = _diarization(run)
         status("5/5 Merge words and speaker turns, including overlap markers")
@@ -104,7 +106,9 @@ def prepare(status: Callable[[str], None], token: str | None, alignment: bool) -
         stages.append("prepare-align")
     for stage in stages:
         status(f"Model download / loading check: {stage}")
+        # pragma: no mutate start -- preparation stages read neither their source nor their target
         worker(stage, Path("."), Path("."), status, token, offline=False)
+        # pragma: no mutate end
 
 
 def worker(
@@ -122,15 +126,17 @@ def worker(
     """
     env = _worker_environment(token, offline)
     command = [sys.executable, "-m", "interview_local.worker", stage]
-    with subprocess.Popen(
-        [*command, str(source), str(target)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    ) as proc:
+    with (
+        subprocess.Popen(
+            [*command, str(source), str(target)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,  # pragma: no mutate -- Popen decodes text whenever an encoding is given
+            encoding="utf-8",
+            errors="replace",
+        ) as proc
+    ):
         try:
             tail = _relayed_output(proc.stdout, status, env.get("HF_TOKEN"))
             code = proc.wait()
@@ -253,11 +259,17 @@ def _worker_environment(token: str | None, offline: bool) -> dict:
     env = os.environ.copy()
     if token:
         env["HF_TOKEN"] = token
+    # pragma: no mutate start -- the worker module sets this itself before importing any library
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    # pragma: no mutate end
+    # pragma: no mutate start -- the worker module sets this itself before importing any library
     env["PYANNOTE_METRICS_ENABLED"] = "0"
+    # pragma: no mutate end
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
+        # pragma: no mutate start -- huggingface_hub, which every model library here downloads through, already reads HF_HUB_OFFLINE set above
         env["TRANSFORMERS_OFFLINE"] = "1"
+        # pragma: no mutate end
     return env
 
 

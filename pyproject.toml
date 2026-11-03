@@ -11,3 +11,39 @@ dependencies = ["onnxruntime>=1.20,<2", "psutil>=6,<8", "av>=14,<19", "soundfile
 interview-local = "interview_local.cli:main"
 [tool.setuptools.packages.find]
 include = ["interview_local*"]
+
+[tool.mutmut]
+source_paths = ["interview_local/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# Run ad hoc, outside the project environment:
+#   uv run --no-sync --with mutmut --with pytest mutmut run "<glob>"
+# Each pattern silences one class of mutants that cannot change a result: prose
+# shown to a person, or spellings the called library treats as identical.
+do_not_mutate_patterns = [
+    # Codec names are case-insensitive, so "UTF-8" reads and writes as "utf-8".
+    '"utf-8"',
+    # json reads ensure_ascii only for truthiness, so None behaves as False.
+    'ensure_ascii=False',
+    # A line holding nothing but a prose message fragment.
+    '^\s*f?"[^"{}]* [^"{}]*"( \+ str\(exc\))?\s*\)?,?\s*$',
+    '^\s*\+ f?"[^"{}]* [^"{}]*"\s*$',
+    # argparse help and description texts.
+    '\b(help|description)="',
+    # Terminal prompts.
+    'input\(f?"',
+    '^\s*prompt = f?"',
+    'getpass\.getpass\(',
+    # Exception messages written on the raise line.
+    'raise \w+\(f?"[^"]*"\)\s*$',
+    # Console notices and when they are flushed.
+    '^\s*print\(f?"',
+    '^\s*flush=True,?\s*$',
+    # Progress notices.
+    'status\(f?"',
+    # Tk window titles, labels, fonts, padding and layout.
+    '\.pack\(|font=|padding=|\btitle=|\.title\(|\btext="|filetypes=|\.geometry\(|messagebox\.show|^\s*value="|status\.set\("',
+    'ttk\.(Frame|Notebook)\(|^\s*frame,\s*$|^\s*anchor="',
+]
+
+[tool.pytest.ini_options]
+addopts = "--ignore=mutants"

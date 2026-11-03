@@ -69,13 +69,19 @@ def decode(source: Path, target: Path) -> None:
     with (
         av.open(str(source)) as container,
         sf.SoundFile(
-            str(target), "w", samplerate=SAMPLE_RATE, channels=1, subtype="PCM_16"
+            str(target),
+            "w",
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            subtype="PCM_16",  # pragma: no mutate -- PCM_16 is soundfile's default WAV subtype, and subtype names are case-insensitive
         ) as output,
     ):
         resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
         for array in _resampled(container, resampler):
             output.write(array)
+            # pragma: no mutate start -- only whether the count is zero is read, and PyAV never yields an empty chunk
             samples += len(array)
+            # pragma: no mutate end
     if not samples:
         raise ValueError("The file contains no audio track.")
 
@@ -84,9 +90,13 @@ def _resampled(container, resampler):
     """Sample arrays of every decoded frame, then the resampler's remainder."""
     for frame in container.decode(audio=0):
         for chunk in resampler.resample(frame):
+            # pragma: no mutate start -- NumPy infers the size for any negative value
             yield chunk.to_ndarray().reshape(-1)
+            # pragma: no mutate end
     for chunk in resampler.resample(None):
+        # pragma: no mutate start -- NumPy infers the size for any negative value
         yield chunk.to_ndarray().reshape(-1)
+        # pragma: no mutate end
 
 
 def transcribe(source: Path, target: Path) -> None:
@@ -137,7 +147,9 @@ def prepare_aligner(source: Path, target: Path) -> None:
 
 
 def _save_result(target: Path, result) -> None:
+    # pragma: no mutate start -- results are only read back through json.loads, which decodes escapes alike; codec names are case-insensitive
     target.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    # pragma: no mutate end
 
 
 def _report_peak_memory() -> None:

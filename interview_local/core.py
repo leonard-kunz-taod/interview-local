@@ -146,7 +146,9 @@ def _speaker_events(turns: list[Turn]) -> dict[float, Counter[str]]:
     """Per instant, how many tracks of each speaker start (+1) or end (-1)."""
     events: defaultdict[float, Counter[str]] = defaultdict(Counter)
     for turn in turns:
+        # pragma: no mutate start -- a zero-length turn adds +1 and -1 at one instant, so admitting it changes no count
         if turn.end > turn.start:
+            # pragma: no mutate end
             events[turn.start][turn.speaker] += 1
             events[turn.end][turn.speaker] -= 1
     return events
@@ -191,9 +193,13 @@ def _ranked_candidates(
     word: Word, turns: list[Turn], turn_starts: list[float]
 ) -> list[tuple[float, Turn]]:
     """Turns touching the word, paired with their overlap, largest first."""
+    # pragma: no mutate start -- exclusive turns never overlap, so no earlier turn reaches the word
     first = max(0, bisect.bisect_right(turn_starts, word.start) - 1)
+    # pragma: no mutate end
     candidates = []
+    # pragma: no mutate start -- exclusive turns never overlap, so no earlier turn reaches the word
     for i in range(first, len(turns)):
+        # pragma: no mutate end
         turn = turns[i]
         if turn.start > word.end:
             break
@@ -214,9 +220,13 @@ def _best_speaker(
 def _simultaneous_speakers(
     word: Word, regions: list[dict], region_starts: list[float]
 ) -> set[str]:
+    # pragma: no mutate start -- swept regions are disjoint, so no earlier region reaches the word
     first = max(0, bisect.bisect_right(region_starts, word.start) - 1)
+    # pragma: no mutate end
     speakers = set()
+    # pragma: no mutate start -- swept regions are disjoint, so no earlier region reaches the word
     for i in range(first, len(regions)):
+        # pragma: no mutate end
         region = regions[i]
         if region["start"] > word.end:
             break

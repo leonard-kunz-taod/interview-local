@@ -143,7 +143,9 @@ class OllamaClient:
             ) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
+            # pragma: no mutate start -- bytes.decode defaults to UTF-8, and codec names are case-insensitive
             detail = exc.read(2000).decode("utf-8", errors="replace")
+            # pragma: no mutate end
             raise RuntimeError(
                 f"Local Ollama request failed ({exc.code}): {detail}"
             ) from None
@@ -173,7 +175,9 @@ class OllamaClient:
         """Download the model from the Ollama registry, reporting progress."""
         status(f"Downloading {MODEL} from the Ollama registry (no HF account needed) …")
         # The pull endpoint streams progress; do not print download tokens or text.
+        # pragma: no mutate start -- Ollama streams pull progress by default
         request = self._json_request("/api/pull", {"model": MODEL, "stream": True})
+        # pragma: no mutate end
         try:
             with self.opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 _report_pull_progress(response, status)
@@ -217,7 +221,9 @@ class OllamaClient:
         return urllib.request.Request(
             LOCAL_ENDPOINT + endpoint,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",  # pragma: no mutate -- urllib normalizes the case of header names
+            },
         )
 
 
@@ -352,7 +358,9 @@ def _fingerprint(value) -> str:
 
 
 def _tokens(text: str) -> list[str]:
+    # pragma: no mutate start -- re.UNICODE is already the default for str patterns
     return re.findall(r"[^\W_]+", text.casefold(), re.UNICODE)
+    # pragma: no mutate end
 
 
 def _source_words(source: dict) -> list[dict]:
@@ -419,7 +427,13 @@ def _edit_request(speakers: dict, words: list[dict], offset: int) -> dict:
         "editable_range": [chunk[0]["word_id"], chunk[-1]["word_id"]],
         "editable_words": [_compact(w) for w in chunk],
         "context_before": [
-            _compact(w) for w in words[max(0, offset - CONTEXT_WORDS) : offset]
+            _compact(w)
+            for w in words[
+                max(
+                    0,  # pragma: no mutate -- offsets are 0 or at least EDIT_CHUNK_WORDS, which exceeds CONTEXT_WORDS
+                    offset - CONTEXT_WORDS,
+                ) : offset
+            ]
         ],
         "context_after": [_compact(w) for w in words[after : after + CONTEXT_WORDS]],
     }
@@ -578,7 +592,9 @@ def _source_reasons(words: list[dict]) -> list[str]:
 
 def _similarity(original: str, edited: str) -> float:
     matcher = difflib.SequenceMatcher(
-        a=_tokens(original), b=_tokens(edited), autojunk=False
+        a=_tokens(original),
+        b=_tokens(edited),
+        autojunk=False,  # pragma: no mutate -- difflib reads autojunk only for truthiness
     )
     return matcher.ratio()
 
@@ -773,9 +789,13 @@ def _review_request(paragraph: dict, selected: list[dict]) -> dict:
 def _validated_review(response: dict, paragraph_id: int) -> dict:
     items = response["reviews"]
     if not isinstance(items, list) or len(items) != 1:
+        # pragma: no mutate start -- the caller replaces every invalid review by a fixed verdict and drops this message
         raise ValueError(INVALID_REVIEW)
+        # pragma: no mutate end
     if not _is_verdict_for(items[0], paragraph_id):
+        # pragma: no mutate start -- the caller replaces every invalid review by a fixed verdict and drops this message
         raise ValueError(INVALID_REVIEW)
+        # pragma: no mutate end
     return items[0]
 
 

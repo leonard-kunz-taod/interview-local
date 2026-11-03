@@ -84,7 +84,9 @@ def _save_speaker_files(result: dict, stem: Path) -> None:
 def _save_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Replace atomically so interrupted writes do not leave a partial JSON file.
+    # pragma: no mutate start -- replaced onto path before returning, so its name is never observed
     temporary = path.with_suffix(path.suffix + ".tmp")
+    # pragma: no mutate end
     temporary.write_text(
         json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
     )
