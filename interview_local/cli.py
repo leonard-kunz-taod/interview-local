@@ -269,7 +269,6 @@ def save_named_speakers(result: dict, args: argparse.Namespace, output: Path) ->
 
 
 def finish_transcript(result: dict, args: argparse.Namespace, output: Path) -> None:
-    """Print the speaker transcript with --no-llm, else draft the readable transcript."""
     if args.no_llm:
         print(render(result))
     else:

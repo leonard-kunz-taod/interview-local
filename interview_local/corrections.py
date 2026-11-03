@@ -25,29 +25,12 @@ class CorrectedParagraph:
 
 
 def readable_source_words(readable: dict) -> list[dict]:
-    """Return the validated source words embedded in a readable (03) transcript.
-
-    Args:
-        readable: The parsed 03_readable.json content.
-
-    Returns:
-        Source word dicts ordered by consecutive ``word_id``.
-    """
+    """The validated source words embedded in a readable (03) transcript, ordered by consecutive ``word_id``."""
     return source_words(readable["source_transcript"])
 
 
 def load_corrected_paragraphs(run_dir: Path, readable: dict) -> list[CorrectedParagraph]:
-    """Load the corrected paragraphs of a run.
-
-    Without corrections.json the run has no corrections yet and its paragraphs
-    are those of the readable transcript.
-
-    Args:
-        run_dir: The run's output directory.
-        readable: The parsed 03_readable.json content of that run.
-
-    Returns:
-        Paragraphs covering every source word exactly once, in order.
+    """Load a run's corrected paragraphs; without corrections.json, those of the readable transcript.
 
     Raises:
         ValueError: If corrections.json belongs to a different readable
@@ -63,15 +46,7 @@ def load_corrected_paragraphs(run_dir: Path, readable: dict) -> list[CorrectedPa
 
 
 def load_speaker_names(run_dir: Path, readable: dict) -> dict[str, str]:
-    """Load the speaker names of a run; without corrections the readable transcript's names.
-
-    Args:
-        run_dir: The run's output directory.
-        readable: The parsed 03_readable.json content of that run.
-
-    Returns:
-        Display names keyed by speaker label.
-    """
+    """A run's display names keyed by speaker label; without corrections the readable transcript's names."""
     stored = _stored_corrections(run_dir, readable)
     names = dict(readable["speakers"]) if stored is None else dict(stored["speakers"])
     validate_speaker_names(names, readable)
@@ -106,10 +81,6 @@ def _paragraph_from_readable(paragraph: dict) -> CorrectedParagraph:
 def validate_coverage(paragraphs: list[CorrectedParagraph], readable: dict) -> None:
     """Require every source word exactly once, in order, and known speakers.
 
-    Args:
-        paragraphs: The paragraphs to check.
-        readable: The parsed 03_readable.json content they belong to.
-
     Raises:
         ValueError: On gaps, overlaps, reordering, empty text or unknown speakers.
     """
@@ -137,11 +108,7 @@ def _require_known_speaker(paragraph: CorrectedParagraph, speakers: dict[str, st
 
 
 def validate_speaker_names(names: dict[str, str], readable: dict) -> None:
-    """Require one non-empty name for exactly the readable transcript's speaker labels.
-
-    Raises:
-        ValueError: If labels differ or a name is empty.
-    """
+    """Require one non-empty name for exactly the readable transcript's speaker labels."""
     if set(names) != set(readable["speakers"]):
         raise ValueError(f"Speaker names must be given for exactly {sorted(readable['speakers'])}.")
     if not all(map(_is_usable_name, names.values())):
@@ -154,15 +121,7 @@ def _is_usable_name(name: str) -> bool:
 
 def edit_paragraph_text(paragraphs: list[CorrectedParagraph], first_word: int,
                         text: str) -> list[CorrectedParagraph]:
-    """Replace the text of the paragraph starting at first_word.
-
-    Args:
-        paragraphs: The current paragraphs.
-        first_word: Source word id where the edited paragraph starts.
-        text: The new paragraph text.
-
-    Returns:
-        A new paragraph list with the edited paragraph marked ``text_edited``.
+    """Replace the text of the paragraph starting at first_word; returns a new list.
 
     Raises:
         ValueError: If no paragraph starts at first_word or the text has no words.
@@ -184,22 +143,13 @@ def _paragraph_position(paragraphs: list[CorrectedParagraph], first_word: int) -
 def reassign_words(paragraphs: list[CorrectedParagraph], readable_words: list[dict],
                    known_speakers: set[str], first_word: int, last_word: int,
                    speaker: str) -> list[CorrectedParagraph]:
-    """Assign a word range inside one paragraph to a speaker, splitting the paragraph.
+    """Assign the inclusive source word range first_word..last_word inside one paragraph to a speaker.
 
-    The range widens outward to whole display words; inserted display words go
+    The paragraph splits into up to three. The range widens outward to whole display words; inserted display words go
     with their preceding source word. A range part without any display word is
     absorbed into the reassigned part. Neighbours with the same speaker are not merged.
 
-    Args:
-        paragraphs: The current paragraphs.
-        readable_words: All source words of the readable transcript.
-        known_speakers: Speaker labels of the readable transcript.
-        first_word: First source word id of the range.
-        last_word: Last source word id of the range (inclusive).
-        speaker: The speaker label to assign.
-
-    Returns:
-        A new paragraph list with up to three paragraphs in place of the old one.
+    Returns a new paragraph list.
 
     Raises:
         ValueError: If the speaker is unknown, the range is invalid, spans more
@@ -292,23 +242,12 @@ def _split_parts(paragraph: CorrectedParagraph, begin: int, end: int,
 
 
 def _text_within(display_words: list[DisplayWord], anchors: list[tuple[int, int]], low: int, high: int) -> str:
-    """The display words whose anchor range lies within low..high."""
     return " ".join(word.text for word, (first, last) in zip(display_words, anchors) if low <= first <= last <= high)
 
 
 def save_corrections(run_dir: Path, readable: dict, speakers: dict[str, str],
                      paragraphs: list[CorrectedParagraph]) -> None:
-    """Validate and atomically write corrections.json into the run directory.
-
-    Args:
-        run_dir: The run's output directory.
-        readable: The parsed 03_readable.json content the corrections refer to.
-        speakers: Display names keyed by speaker label.
-        paragraphs: Paragraphs covering every source word exactly once.
-
-    Raises:
-        ValueError: If paragraphs or speaker names are invalid.
-    """
+    """Validate, then atomically write corrections.json into the run directory."""
     validate_coverage(paragraphs, readable)
     validate_speaker_names(speakers, readable)
     save_json(run_dir / CORRECTIONS_FILENAME, dict(

@@ -33,14 +33,8 @@ def align_text_to_source(text: str, source_words: list[dict]) -> list[DisplayWor
     """Align display text with source words on casefolded word tokens.
 
     Case and punctuation differences are not changes, matching
-    ``content_changed`` in ``llm.validate_edit``.
-
-    Args:
-        text: The paragraph text shown to the user.
-        source_words: Source word dicts with ``word_id`` and ``text``, in order.
-
-    Returns:
-        One DisplayWord per whitespace-separated word with word characters.
+    ``content_changed`` in ``llm.validate_edit``. ``source_words`` are dicts
+    with ``word_id`` and ``text``, in order.
 
     Raises:
         ValueError: If the text contains no words or the source is empty.

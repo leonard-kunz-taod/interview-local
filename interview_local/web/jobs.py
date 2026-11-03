@@ -44,18 +44,15 @@ class TranscriptionJob:
         self._error: str | None = None
 
     def start(self) -> None:
-        """Start processing in a daemon thread."""
         threading.Thread(target=self._run, name=f"transcription-{self.job_id}", daemon=True).start()
 
     def status(self) -> JobStatus:
-        """Return the current progress snapshot."""
         with self._lock:
             return JobStatus(run_id=self.run_dir.name, state=self._state,
                              phase=self._phase, detail=self._detail, error=self._error)
 
     @property
     def running(self) -> bool:
-        """Whether the job has neither finished nor failed."""
         with self._lock:
             return self._state == "running"
 
@@ -94,11 +91,7 @@ class TranscriptionJob:
 
 
 def diarization_token() -> str | None:
-    """Return the HF token for speaker recognition without prompting.
-
-    Returns:
-        ``None`` when the local community-1 folder is used, else the token from
-        HF_TOKEN or the cached Hugging Face login.
+    """The HF token for speaker recognition, never prompting; ``None`` when the local community-1 folder is used.
 
     Raises:
         RuntimeError: If neither the local model nor any HF credential exists.

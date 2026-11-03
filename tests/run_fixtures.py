@@ -84,13 +84,7 @@ INTERVIEW_TURNS = [Turn(0, 4, "first"), Turn(4.5, 9, "second")]
 
 
 def readable_transcript(paragraphs, words=None, regular_turns: Sequence[Turn] = ()):
-    """Return a readable transcript of interview_words edited into the given paragraphs.
-
-    Args:
-        paragraphs: (first_word, last_word, speaker, text) tuples the scripted LLM returns.
-        words: Source words; interview_words() by default.
-        regular_turns: Regular diarization turns for overlap detection.
-    """
+    """A readable transcript of the source words edited into ``paragraphs``: (first_word, last_word, speaker, text) tuples."""
     source = merge(words or interview_words(), INTERVIEW_TURNS, list(regular_turns))
     source["speakers"].update(A="Anna", B="Bernd")
     return enhance(source, client=ScriptedClient(paragraphs), status=lambda _: None)

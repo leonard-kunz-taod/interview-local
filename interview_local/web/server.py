@@ -36,26 +36,18 @@ EXPORT_FORMATS = {"export.md": ("md", True, "text/markdown; charset=utf-8"),
 
 
 class HttpError(Exception):
-    """A request failure with the HTTP status to report."""
-
     def __init__(self, status: HTTPStatus, message: str):
         super().__init__(message)
         self.status = status
 
 
 class RangeNotSatisfiable(HttpError, ValueError):
-    """The requested byte range lies outside the file."""
-
     def __init__(self, message: str):
         super().__init__(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, message)  # pragma: no mutate - message is wording; the 416 status is asserted
 
 
 def serve(runs_root: Path) -> None:
-    """Serve the web UI on an ephemeral loopback port and open it in the browser; stop on Ctrl+C.
-
-    Args:
-        runs_root: Directory that holds one subdirectory per run.
-    """
+    """Serve the web UI on an ephemeral loopback port and open it in the browser; stop on Ctrl+C."""
     runs_root.mkdir(parents=True, exist_ok=True)
     server = EditorServer(runs_root)
     url = f"http://{LOOPBACK_HOST}:{server.server_address[1]}/"
@@ -70,8 +62,6 @@ def serve(runs_root: Path) -> None:
 
 
 class EditorState:
-    """Shared server state: the runs directory, jobs and write locks."""
-
     def __init__(self, runs_root: Path):
         self.runs_root = runs_root.resolve()
         self.jobs: dict[str, TranscriptionJob] = {}
@@ -79,13 +69,10 @@ class EditorState:
         self.corrections_lock = threading.Lock()
 
     def job_running(self) -> bool:
-        """Whether any transcription job is still running."""
         return any(job.running for job in self.jobs.values())
 
 
 class EditorServer(ThreadingHTTPServer):
-    """A threading HTTP server bound to an ephemeral loopback port."""
-
     daemon_threads = True
 
     def __init__(self, runs_root: Path):
@@ -94,14 +81,9 @@ class EditorServer(ThreadingHTTPServer):
 
 
 def parse_byte_range(header: str, size: int) -> tuple[int, int]:
-    """Parse a single-range ``Range`` header.
+    """Parse a single-range ``Range`` header (``bytes=0-1023``, ``bytes=500-``, ``bytes=-500``).
 
-    Args:
-        header: The header value, e.g. ``bytes=0-1023``, ``bytes=500-`` or ``bytes=-500``.
-        size: The file size in bytes.
-
-    Returns:
-        The inclusive first and last byte positions.
+    Returns the inclusive first and last byte positions within a file of ``size`` bytes.
 
     Raises:
         RangeNotSatisfiable: If the range lies outside the file.
@@ -417,7 +399,6 @@ def audio_extension(filename: str) -> str:
 
 
 def create_run_dir(runs_root: Path) -> Path:
-    """Create a new, timestamp-named run directory under runs_root."""
     run_dir = runs_root / datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
     run_dir.mkdir(parents=True)
     return run_dir

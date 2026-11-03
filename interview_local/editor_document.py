@@ -10,18 +10,10 @@ UNASSIGNED_NAME = "Unassigned"
 
 
 def build_editor_document(readable: dict, paragraphs: list[CorrectedParagraph], speakers: dict[str, str]) -> dict:
-    """Build the JSON document the browser editor renders.
+    """Build the JSON-serializable document the browser editor renders.
 
     Change highlights always compare against the source (ASR) words, so after a
     manual edit they mean "differs from speech recognition".
-
-    Args:
-        readable: The parsed 03_readable.json content.
-        paragraphs: The run's corrected paragraphs.
-        speakers: Display names keyed by speaker label.
-
-    Returns:
-        A JSON-serializable dict with speakers and highlighted paragraphs.
 
     Raises:
         ValueError: If the source words carry no Whisper word probability.
@@ -50,16 +42,7 @@ def _editor_paragraph(readable_paragraphs: list[dict], words: list[dict], paragr
 
 def speaker_uncertainty(readable_paragraphs: list[dict], paragraph_words: list[dict],
                         paragraph: CorrectedParagraph) -> list[str]:
-    """Reasons to review a paragraph's speaker; a manual reassignment clears them.
-
-    Args:
-        readable_paragraphs: The LLM paragraphs of the parsed 03_readable.json content.
-        paragraph_words: The source words of the paragraph.
-        paragraph: The corrected paragraph.
-
-    Returns:
-        Sorted reason names; empty when the speaker needs no review.
-    """
+    """Sorted reasons to review a paragraph's speaker; a manual reassignment clears them."""
     if paragraph.speaker_edited:
         return []
     reasons = _word_speaker_reasons(paragraph_words)
@@ -110,13 +93,7 @@ def _editor_word(word: DisplayWord, words: list[dict], seek_time: float) -> dict
 def low_asr_confidence(sources: list[dict]) -> bool:
     """Whether speech recognition was uncertain about any of these source words.
 
-    A source word without a Whisper probability (estimated timing for a whole
-    segment) is treated as low confidence: nothing vouches for its recognition.
-
-    Args:
-        sources: Source word dicts with a ``probability`` key.
-
-    Returns:
-        True if any probability is missing or below LOW_ASR_PROBABILITY.
+    A source word without a Whisper probability (aligned or estimated timing)
+    is treated as low confidence: nothing vouches for its recognition.
     """
     return any(w["probability"] is None or w["probability"] < LOW_ASR_PROBABILITY for w in sources)

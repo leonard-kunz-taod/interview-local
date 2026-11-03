@@ -46,7 +46,6 @@ def worker(stage: str, source: Path, target: Path, status: Callable[[str], None]
 
 
 def worker_environment(token: str | None) -> dict[str, str]:
-    """The model worker's environment: this process's, with the HF token if given and telemetry off."""
     env = os.environ.copy()
     if token:
         env["HF_TOKEN"] = token
@@ -70,7 +69,6 @@ def redact(line: str, secret: str | None) -> str:
 
 
 def stop(proc: subprocess.Popen) -> None:
-    """Terminate the worker; kill it if it does not exit in time."""
     proc.terminate()
     try:
         proc.wait(timeout=STOP_TIMEOUT_SECONDS)
@@ -92,7 +90,6 @@ def stage_failure(stage: str, detail: str) -> RuntimeError:
 
 @dataclass(frozen=True)
 class StageRun:
-    """One processing run: its temporary work directory, artifact directory and worker settings."""
     work: Path
     output_dir: Path
     status: Callable[[str], None]
@@ -139,7 +136,6 @@ def claim_output_dir(output_dir: Path) -> Path:
 
 
 def recognize_speech(run: StageRun, source: Path) -> dict:
-    """Decode and transcribe the audio and save the raw transcript."""
     from .artifacts import save_raw
     audio = run.work / DECODED_AUDIO
     run.execute("decode", source, audio)
@@ -168,7 +164,6 @@ def as_whisper_timing(word: dict) -> dict:
 
 
 def attribute_speakers(run: StageRun, raw: dict, raw_words: list[dict], alignment: bool) -> dict:
-    """Diarize, merge words and speaker turns, and save the speaker transcript."""
     from .artifacts import save_speakers
     run.execute("diarize", run.work / DECODED_AUDIO, run.work / "turns.json")
     words = [Word(**w) for w in raw_words]
@@ -183,7 +178,6 @@ def attribute_speakers(run: StageRun, raw: dict, raw_words: list[dict], alignmen
 
 
 def diarization_turns(diarization: dict[str, list[dict]]) -> tuple[list[Turn], list[Turn]]:
-    """Exclusive and regular turns of the diarize stage's output."""
     return as_turns(diarization["exclusive"]), as_turns(diarization["regular"])
 
 

@@ -161,7 +161,6 @@ def _is_ambiguous(candidates: list[tuple[float, Turn]]) -> bool:
 
 
 def _group_segments(words: list[dict]) -> list[dict]:
-    """Join consecutive non-empty words of one speaker into segments."""
     segments = []
     for word in words:
         if not word["text"]:
@@ -174,7 +173,6 @@ def _group_segments(words: list[dict]) -> list[dict]:
 
 
 def _continues_segment(segments: list[dict], word: dict) -> bool:
-    """Whether the word belongs to the last segment: same speaker, short pause, segment not too long."""
     return (bool(segments) and segments[-1]["speaker"] == word["speaker"]
             and word["start"] - segments[-1]["end"] < SEGMENT_MAX_PAUSE_SECONDS
             and word["end"] - segments[-1]["start"] < SEGMENT_MAX_SECONDS)

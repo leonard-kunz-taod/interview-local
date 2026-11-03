@@ -46,15 +46,7 @@ def readable_text(result: dict, markdown=False):
 
 
 def corrected_text(paragraphs: list[dict], markdown: bool) -> str:
-    """Render corrected paragraphs as a clean transcript without review markers.
-
-    Args:
-        paragraphs: The ``paragraphs`` of ``editor_document.build_editor_document``.
-        markdown: Whether to use Markdown headings.
-
-    Returns:
-        The transcript text with speaker name and time range per paragraph.
-    """
+    """Render corrected paragraphs as a clean transcript without review markers."""
     lines = [("# " if markdown else "") + "Corrected transcript", ""]
     for p in paragraphs:
         heading = f"{p['speaker_name']} · {timestamp(p['start'])}–{timestamp(p['end'])}"
