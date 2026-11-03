@@ -62,6 +62,29 @@ class AlignTextToSourceTests(unittest.TestCase):
                 content_changed = tokens(text) != tokens(" ".join(texts))
                 self.assertEqual(is_highlighted(align_text_to_source(text, source(*texts))), content_changed)
 
+    def test_display_word_covering_several_source_words_shows_them_joined(self):
+        words = align_text_to_source("Hausboot", source("Haus", "boot"))
+        self.assertEqual((words[0].source_word_ids, words[0].original_text), ((10, 11), "Haus boot"))
+
+    def test_several_removed_words_are_reported_together(self):
+        words = align_text_to_source("Guten Tag", source("Guten", "äh", "ähm", "Tag"))
+        self.assertEqual(words[1].removed_before, "äh ähm")
+
+    def test_display_word_with_one_changed_part_is_replaced(self):
+        words = align_text_to_source("Haus-Boot", source("Hof", "Boot"))
+        self.assertEqual(words[0].change, "replaced")
+
+    def test_frequent_word_between_edited_neighbours_in_a_long_paragraph_stays_unchanged(self):
+        texts = []
+        for number in range(200):
+            texts.append(f"wort{number}")
+            if number % 20 == 19:
+                texts.append("und")
+        first_und = texts.index("und")
+        edited = texts[:first_und - 1] + ["neu", "und", "neu"] + texts[first_und + 2:]
+        words = align_text_to_source(" ".join(edited), source(*texts))
+        self.assertEqual((words[first_und].text, words[first_und].change), ("und", "unchanged"))
+
     def test_text_without_words_is_rejected(self):
         with self.assertRaises(ValueError):
             align_text_to_source(" – ", source("Ja"))

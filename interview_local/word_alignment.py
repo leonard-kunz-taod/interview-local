@@ -96,7 +96,7 @@ class _Opcode:
 
 def _token_opcodes(text_tokens: list[tuple[str, int]], source_tokens: list[tuple[str, int]]) -> list[_Opcode]:
     matcher = difflib.SequenceMatcher(a=[t for t, _ in text_tokens], b=[t for t, _ in source_tokens],
-                                      autojunk=False)
+                                      autojunk=False)  # pragma: no mutate - difflib tests autojunk for truthiness, so None equals False; True is killed by the frequent-word test
     return [_resolve(opcode, text_tokens, source_tokens) for opcode in matcher.get_opcodes()]
 
 
@@ -162,7 +162,7 @@ class _TokenAlignment:
         for next_index, word_id in self.deleted_ids:
             owner = self._owner_of(word_id)
             if owner is None:
-                removed_before[next_index][word_id] = None
+                removed_before[next_index][word_id] = None  # pragma: no mutate - an insertion-ordered set: values are never read
             else:
                 self.changed[owner] = True
         return removed_before

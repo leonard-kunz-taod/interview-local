@@ -1,21 +1,26 @@
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import asdict
+from datetime import datetime
 from http.client import HTTPResponse
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from interview_local.artifacts import save_readable
-from interview_local.web.server import (EditorRequestHandler, EditorState, RangeNotSatisfiable, parse_byte_range,
-                                        serve, static_file)
-from run_fixtures import TWO_PARAGRAPHS, readable_transcript
+from interview_local.web.server import (EditorRequestHandler, EditorState, HttpError, RangeNotSatisfiable,
+                                        create_run_dir, parse_byte_range, resolve_run_dir, serve, static_file)
+from run_fixtures import TWO_PARAGRAPHS, ScriptedClient, readable_transcript, speech_models
 
 PORT = 8765
 HOST = f"127.0.0.1:{PORT}"
 RUN_ID = "2026-01-01_10-00-00-000000"
 AUDIO_BYTES = bytes(range(256)) * 4
+JOB_TIMEOUT_SECONDS = 10
 
 
 class InMemoryConnection:
@@ -64,8 +69,31 @@ def request_head(method, path, headers):
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
 
 
+def raw_exchange(server, method, path, body=b"", headers=None, trailing=b""):
+    """Send one request, followed by trailing bytes on the same connection; return the raw response bytes."""
+    headers = {"Host": HOST, "Content-Length": str(len(body)), **(headers or {})}
+    connection = InMemoryConnection(request_head(method, path, headers) + body + trailing)
+    with patch.object(EditorRequestHandler, "log_message"):
+        EditorRequestHandler(connection, ("127.0.0.1", 50000), server)
+    return bytes(connection.response)
+
+
+def raw_body(raw_response):
+    return raw_response.partition(b"\r\n\r\n")[2]
+
+
 def send_json(server, method, path, value):
     return exchange(server, method, path, json.dumps(value).encode(), {"Content-Type": "application/json"})
+
+
+def finished_job(server, job_id):
+    """Poll the job endpoint until the job leaves the running state; return its last status."""
+    deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+    while True:
+        job = json.loads(exchange(server, "GET", f"/api/jobs/{job_id}")[2])
+        if job["state"] != "running" or time.monotonic() > deadline:
+            return job
+        time.sleep(.02)
 
 
 def stage_file_contents(run_dir):
@@ -100,11 +128,48 @@ class ServeTests(unittest.TestCase):
         url = f"http://{HOST}/"
         self.assertEqual((url in printed, opened), (True, [url]))
 
-    def test_missing_runs_directory_is_created(self):
+    def test_missing_runs_directory_is_created_with_its_parents(self):
         with tempfile.TemporaryDirectory() as directory:
-            runs_root = Path(directory) / "runs"
+            runs_root = Path(directory) / "interviews" / "runs"
             interrupted_serve(runs_root)
             self.assertTrue(runs_root.is_dir())
+
+
+class FixedClock:
+    """Stands in for datetime: now() is always the same upload time."""
+    UPLOAD_TIME = datetime(2026, 1, 2, 9, 30, 15, 250)
+
+    @classmethod
+    def now(cls):
+        return cls.UPLOAD_TIME
+
+
+class RunDirectoryTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.runs_root = Path(self.directory.name)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_run_directory_is_named_after_its_creation_time(self):
+        with patch("interview_local.web.server.datetime", FixedClock):
+            run_dir = create_run_dir(self.runs_root)
+        self.assertEqual(run_dir, self.runs_root / "2026-01-02_09-30-15-000250")
+
+    def test_run_directory_is_created_when_the_runs_root_is_missing(self):
+        run_dir = create_run_dir(self.runs_root / "deleted")
+        self.assertTrue(run_dir.is_dir())
+
+    def test_run_id_with_a_backslash_is_rejected(self):
+        (self.runs_root / "other\\run").mkdir()
+        with self.assertRaises(HttpError):
+            resolve_run_dir(self.runs_root, "other\\run")
+
+    def test_run_id_that_is_a_path_to_a_run_is_rejected(self):
+        (self.runs_root / RUN_ID).mkdir()
+        with self.assertRaises(HttpError):
+            resolve_run_dir(self.runs_root, f"other/../{RUN_ID}")
 
 
 class ByteRangeTests(unittest.TestCase):
@@ -119,6 +184,16 @@ class ByteRangeTests(unittest.TestCase):
 
     def test_suffix_range_returns_the_last_bytes(self):
         self.assertEqual(parse_byte_range("bytes=-10", 100), (90, 99))
+
+    def test_single_byte_range(self):
+        self.assertEqual(parse_byte_range("bytes=5-5", 100), (5, 5))
+
+    def test_suffix_longer_than_the_file_returns_the_whole_file(self):
+        self.assertEqual(parse_byte_range("bytes=-200", 100), (0, 99))
+
+    def test_suffix_range_of_an_empty_file_is_not_satisfiable(self):
+        with self.assertRaises(RangeNotSatisfiable):
+            parse_byte_range("bytes=-10", 0)
 
     def test_range_beyond_the_file_is_not_satisfiable(self):
         for header in ("bytes=100-", "bytes=-0", "bytes=20-10"):
@@ -173,6 +248,16 @@ class RequestGuardTests(unittest.TestCase):
         status, _, _ = exchange(self.server, "PUT", f"/api/runs/{RUN_ID}/speakers", b'{"A": "x"}',
                                 {"Content-Type": "text/plain"})
         self.assertEqual(status, 415)
+
+    def test_write_without_any_content_type_is_rejected(self):
+        status, _, _ = exchange(self.server, "PUT", f"/api/runs/{RUN_ID}/speakers", b'{"A": "x"}')
+        self.assertEqual(status, 415)
+
+    def test_json_response_declares_its_type_length_and_no_caching(self):
+        _, response, body = exchange(self.server, "GET", "/api/runs")
+        headers = (response.getheader("Content-Type"), response.getheader("Content-Length"),
+                   response.getheader("Cache-Control"))
+        self.assertEqual(headers, ("application/json; charset=utf-8", str(len(body)), "no-store"))
 
     def test_unknown_route_is_not_found(self):
         for method, path in (("GET", "/api/unknown"), ("POST", "/"), ("PUT", f"/api/runs/{RUN_ID}/document"),
@@ -240,6 +325,70 @@ class UploadTests(unittest.TestCase):
             self.upload("first.wav")
             status, _, _ = self.upload("second.wav")
         self.assertEqual(status, 409)
+
+    def test_upload_while_another_upload_is_received_is_rejected(self):
+        with self.server.state.upload_lock:
+            status, _, _ = self.upload("interview.wav")
+        self.assertEqual(status, 409)
+
+    def test_empty_upload_is_rejected_without_a_run(self):
+        status, _, _ = self.upload("interview.wav", body=b"")
+        self.assertEqual((status, list(self.runs_root.iterdir())), (400, []))
+
+    def test_one_byte_upload_is_accepted(self):
+        with patch("interview_local.web.jobs.TranscriptionJob.start"):
+            status, _, _ = self.upload("interview.wav", body=b"R")
+        self.assertEqual(status, 202)
+
+    def test_upload_without_a_speaker_name_is_rejected(self):
+        for case, query in (("no names", ""), ("only the second name", "name_b=Bernd")):
+            with self.subTest(case):
+                status, _, _ = self.upload("interview.wav", query=query)
+                self.assertEqual(status, 400)
+
+    def test_upload_without_a_filename_is_rejected(self):
+        status, _, _ = exchange(self.server, "POST", "/api/runs?name_a=Anna&name_b=Bernd", AUDIO_BYTES,
+                                {"Content-Type": "application/json"})
+        self.assertEqual(status, 400)
+
+    def test_upload_that_ends_early_is_rejected_without_a_run(self):
+        raw = raw_exchange(self.server, "POST", "/api/runs?name_a=Anna&name_b=Bernd", AUDIO_BYTES[:10],
+                           {"X-Audio-Filename": "interview.wav", "Content-Length": str(len(AUDIO_BYTES))})
+        self.assertEqual((raw.split()[1], list(self.runs_root.iterdir())), (b"400", []))
+
+    def test_upload_stores_exactly_the_announced_length(self):
+        with patch("interview_local.web.jobs.TranscriptionJob.start"):
+            raw = raw_exchange(self.server, "POST", "/api/runs?name_a=Anna&name_b=Bernd", AUDIO_BYTES,
+                               {"X-Audio-Filename": "interview.wav"}, trailing=b"next request")
+        stored = (self.runs_root / json.loads(raw_body(raw))["run_id"] / "source.wav").read_bytes()
+        self.assertEqual(stored, AUDIO_BYTES)
+
+    def test_job_endpoint_reports_the_job_status(self):
+        with patch("interview_local.web.jobs.TranscriptionJob.start"):
+            _, _, body = self.upload("interview.wav")
+        job_id = json.loads(body)["job_id"]
+        _, _, job = exchange(self.server, "GET", f"/api/jobs/{job_id}")
+        self.assertEqual(json.loads(job), asdict(self.server.state.jobs[job_id].status()))
+
+    def transcribed_upload(self, failing_stage=None):
+        """Upload a recording, let its job run against the speech-model and LLM stand-ins; return
+        (upload response, final job status)."""
+        with (patch("interview_local.pipeline.worker", speech_models(failing_stage)),
+              patch("interview_local.web.jobs.OllamaClient", lambda: ScriptedClient([(0, 1, "A", "Guten Tag.")])),
+              patch("interview_local.models.local_diarization_model", lambda: None),
+              patch.dict(os.environ, {"HF_TOKEN": "hf_test"})):
+            _, _, body = self.upload("interview.wav", body=AUDIO_BYTES)
+            upload = json.loads(body)
+            return upload, finished_job(self.server, upload["job_id"])
+
+    def test_uploaded_recording_is_transcribed_with_the_entered_speaker_names(self):
+        upload, job = self.transcribed_upload()
+        _, _, document = exchange(self.server, "GET", f"/api/runs/{upload['run_id']}/document")
+        self.assertEqual((job["state"], json.loads(document)["speakers"]), ("done", {"A": "Anna", "B": "Bernd"}))
+
+    def test_failed_job_reports_its_error(self):
+        _, job = self.transcribed_upload(failing_stage="asr")
+        self.assertEqual((job["state"], "model unavailable" in job["error"]), ("failed", True))
 
 
 class EditorApiTests(unittest.TestCase):
@@ -349,6 +498,28 @@ class EditorApiTests(unittest.TestCase):
     def test_audio_without_range_returns_the_whole_file(self):
         status, _, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/audio")
         self.assertEqual((status, body), (200, AUDIO_BYTES))
+
+    def test_audio_response_offers_byte_ranges_and_declares_its_length(self):
+        _, response, _ = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/audio")
+        self.assertEqual((response.getheader("Accept-Ranges"), response.getheader("Content-Length")),
+                         ("bytes", str(len(AUDIO_BYTES))))
+
+    def test_audio_range_response_carries_only_the_requested_bytes(self):
+        raw = raw_exchange(self.server, "GET", f"/api/runs/{RUN_ID}/audio", headers={"Range": "bytes=10-19"})
+        self.assertEqual(raw_body(raw), AUDIO_BYTES[10:20])
+
+    def test_document_names_its_run(self):
+        self.assertEqual(self.document()["run_id"], RUN_ID)
+
+    def test_json_body_is_read_only_up_to_its_announced_length(self):
+        raw = raw_exchange(self.server, "PUT", f"/api/runs/{RUN_ID}/speakers", b'{"A": "Bernd", "B": "Anna"}',
+                           {"Content-Type": "application/json"}, trailing=b"next request")
+        self.assertEqual(raw.split()[1], b"200")
+
+    def test_export_declares_its_type_and_length(self):
+        _, response, body = exchange(self.server, "GET", f"/api/runs/{RUN_ID}/export.txt")
+        self.assertEqual((response.getheader("Content-Type"), response.getheader("Content-Length")),
+                         ("text/plain; charset=utf-8", str(len(body))))
 
 
 if __name__ == "__main__":

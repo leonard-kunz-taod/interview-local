@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 from pathlib import Path
 import unittest
 
@@ -17,11 +18,20 @@ def document_of(readable, paragraphs=None):
     return build_editor_document(readable, paragraphs, NAMES)
 
 
+class DocumentTests(unittest.TestCase):
+    def test_document_carries_the_speaker_names_and_the_low_confidence_threshold(self):
+        document = document_of(readable_transcript(TWO_PARAGRAPHS))
+        self.assertEqual({key: value for key, value in document.items() if key != "paragraphs"},
+                         {"speakers": NAMES, "low_asr_probability": LOW_ASR_PROBABILITY})
+
+
 class ParagraphTests(unittest.TestCase):
-    def test_paragraph_shows_speaker_name_source_time_range_and_text(self):
-        paragraph = document_of(readable_transcript(TWO_PARAGRAPHS))["paragraphs"][1]
-        self.assertEqual((paragraph["speaker_name"], paragraph["start"], paragraph["end"], paragraph["text"]),
-                         ("Bernd", 5, 7, "Danke, gut. Und selbst?"))
+    def test_paragraph_shows_its_word_range_speaker_source_time_range_text_and_edit_marks(self):
+        paragraph = dict(document_of(readable_transcript(TWO_PARAGRAPHS))["paragraphs"][1])
+        del paragraph["words"]
+        self.assertEqual(paragraph, {"first_word": 4, "last_word": 7, "speaker": "B", "speaker_name": "Bernd", "start": 5, "end": 7,
+                                         "text": "Danke, gut. Und selbst?", "text_edited": False, "speaker_edited": False,
+                                         "speaker_uncertainty": []})
 
     def test_clean_paragraphs_have_no_speaker_uncertainty(self):
         document = document_of(readable_transcript(TWO_PARAGRAPHS))
@@ -69,7 +79,8 @@ class WordTests(unittest.TestCase):
     def test_llm_changed_word_carries_its_original(self):
         readable = single_paragraph_draft("Guten Morgen, wie geht's? Danke, gut. Und selbst?")
         word = document_of(readable)["paragraphs"][0]["words"][1]
-        self.assertEqual((word["text"], word["change"], word["original_text"]), ("Morgen,", "replaced", "Tag"))
+        self.assertEqual(word, {"text": "Morgen,", "source_word_ids": [1], "seek_time": .5, "change": "replaced",
+                                    "original_text": "Tag", "removed_before": "", "low_asr_confidence": False})
 
     def test_user_edit_is_compared_with_speech_recognition(self):
         readable = single_paragraph_draft("Guten Morgen, wie geht's? Danke, gut. Und selbst?")
@@ -78,9 +89,12 @@ class WordTests(unittest.TestCase):
         words = document_of(readable, paragraphs)["paragraphs"][0]["words"]
         self.assertEqual([w["change"] for w in words], ["unchanged"] * 8)
 
-    def test_word_seeks_to_its_source_start(self):
-        words = document_of(readable_transcript(TWO_PARAGRAPHS))["paragraphs"][1]["words"]
-        self.assertEqual([w["seek_time"] for w in words], [5, 5.5, 6, 6.5])
+    def test_word_after_a_pause_seeks_to_its_own_source_start(self):
+        source_words = interview_words()
+        pause = 0.25
+        source_words[5] = replace(source_words[5], start=source_words[5].start + pause)
+        words = document_of(readable_transcript(TWO_PARAGRAPHS, words=source_words))["paragraphs"][1]["words"]
+        self.assertEqual([w["seek_time"] for w in words], [5, 5.5 + pause, 6, 6.5])
 
     def test_inserted_word_seeks_to_the_end_of_the_previous_source_word(self):
         readable = single_paragraph_draft("Ach, guten lieben Tag, wie geht's? Danke, gut. Und selbst?")

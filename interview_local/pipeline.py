@@ -111,12 +111,12 @@ def process(source: Path, output_dir: Path, status: Callable[[str], None] = prin
             offline: bool = False, alignment: bool = False, raw_only: bool = False) -> dict:
     source = audio_source(source)
     output_dir = claim_output_dir(output_dir)
-    with tempfile.TemporaryDirectory(prefix="interview-local-") as directory:
+    with tempfile.TemporaryDirectory(prefix="interview-local-") as directory:  # pragma: no mutate - the prefix only names the temporary directory, which is removed afterwards
         run = StageRun(Path(directory), output_dir, status, token, offline)
         raw = recognize_speech(run, source)
         if raw_only:
             return raw
-        run.execute("check-access", source, run.work / "access")
+        run.execute("check-access", source, run.work / "access")  # pragma: no mutate - the check-access stage reads neither its source nor its target (worker.run)
         words = align_words(run) if alignment else whisper_words(run, raw)
         return attribute_speakers(run, raw, words, alignment)
 
@@ -192,7 +192,7 @@ def as_turns(items: list[dict]) -> list[Turn]:
 
 
 def speaker_metadata(words: list[Word], speakers: dict, source_name: str, alignment: bool) -> dict:
-    warnings = ["Automatic transcript: review text and speaker changes before use."]
+    warnings = ["Automatic transcript: review text and speaker changes before use."]  # pragma: no mutate - warning wording shown to the user
     if len(speakers) != REQUESTED_SPEAKERS:
         warnings.append("The model did not detect exactly two speakers despite the requested count.")
     return dict(word_timing_counts=dict(Counter(w.timing for w in words)),

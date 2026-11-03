@@ -6,10 +6,12 @@ import time
 import unittest
 from unittest.mock import patch
 
+from interview_local.pipeline import STEPS
 from interview_local.web.jobs import TranscriptionJob, diarization_token
-from run_fixtures import ScriptedClient, speech_models
+from run_fixtures import ScriptedClient, gated_speech_models, speech_models
 
 JOB_TIMEOUT_SECONDS = 10
+HF_TOKEN = "hf_test"
 
 
 def local_llm():
@@ -45,10 +47,11 @@ class TranscriptionJobTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def run_job(self, failing_stage=None, llm=local_llm):
-        with (patch("interview_local.pipeline.worker", speech_models(failing_stage)),
+    def run_job(self, failing_stage=None, llm=local_llm, models=None):
+        with (patch("interview_local.pipeline.worker", models or speech_models(failing_stage)),
               patch("interview_local.web.jobs.OllamaClient", llm),
-              patch.dict(os.environ, {"HF_TOKEN": "hf_test"})):
+              patch("interview_local.models.local_diarization_model", lambda: None),
+              patch.dict(os.environ, {"HF_TOKEN": HF_TOKEN})):
             job = TranscriptionJob(self.run_dir, self.audio, {"A": "Anna", "B": "Bernd"})
             job.start()
             return finished(job)
@@ -82,6 +85,22 @@ class TranscriptionJobTests(unittest.TestCase):
         status = self.run_job(llm=failing_llm)
         self.assertEqual((status.state, status.phase, "model unavailable" in status.error),
                          ("failed", "llm", True))
+
+    def test_failed_job_shows_the_step_it_failed_in(self):
+        status = self.run_job(failing_stage="diarize")
+        self.assertEqual(status.detail, STEPS["diarize"])
+
+    def test_failed_llm_draft_shows_the_llm_progress(self):
+        status = self.run_job(llm=failing_llm)
+        self.assertTrue(status.detail.startswith("LLM readability"), status.detail)
+
+    def test_speaker_recognition_gets_the_hf_token_of_the_environment(self):
+        status = self.run_job(models=gated_speech_models(HF_TOKEN))
+        self.assertEqual((status.state, status.error), ("done", None))
+
+    def test_status_names_the_run(self):
+        job = TranscriptionJob(self.run_dir, self.audio, {"A": "Anna", "B": "Bernd"})
+        self.assertEqual(job.status().run_id, self.run_dir.name)
 
 
 class DiarizationTokenTests(unittest.TestCase):

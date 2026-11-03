@@ -1,4 +1,4 @@
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import chdir, redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -9,12 +9,15 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from interview_local.artifacts import readable_text
 from interview_local.cli import main
 from interview_local.core import merge
-from run_fixtures import (INTERVIEW_TURNS, TWO_PARAGRAPHS, ScriptedClient, interview_words, readable_transcript,
-                          speech_models)
+from run_fixtures import (INTERVIEW_TURNS, TWO_PARAGRAPHS, ScriptedClient, gated_speech_models, interview_words,
+                          readable_transcript, speech_models, uncached_speech_models)
 
 SPEECH_PARAGRAPHS = [(0, 1, "A", "Guten Tag.")]
+HF_TOKEN = "hf_test"
+WINDOWS_OS = SimpleNamespace(**{**vars(os), "name": "nt"})
 
 
 class PreparingClient(ScriptedClient):
@@ -43,8 +46,22 @@ def cancelled_input(prompt):
     raise KeyboardInterrupt
 
 
-def run_cli(*arguments, answers=(), paragraphs=SPEECH_PARAGRAPHS):
+class UnreachableClient(ScriptedClient):
+    """A local LLM service that is not running."""
+
+    def ready(self):
+        raise RuntimeError("Ollama is not running")
+
+
+def unanswered_token_prompt(prompt):
+    raise AssertionError("The run asked for an HF token.")
+
+
+def run_cli(*arguments, answers=(), paragraphs=SPEECH_PARAGRAPHS, models=None, llm=PreparingClient):
     """Run the command line with stand-ins for the speech models and the local LLM.
+
+    The HF token comes from HF_TOKEN; there is no local diarization model, and the stand-in for the gated
+    speaker-recognition model accepts only that token.
 
     Returns:
         The exit code, standard output and standard error.
@@ -53,9 +70,25 @@ def run_cli(*arguments, answers=(), paragraphs=SPEECH_PARAGRAPHS):
     typed = iter(answers)
     with (patch.object(sys, "argv", ["interview-local", *map(str, arguments)]),
           patch("builtins.input", lambda prompt: next(typed)),
-          patch("interview_local.pipeline.worker", speech_models()),
-          patch("interview_local.llm.OllamaClient", lambda: PreparingClient(paragraphs)),
-          patch.dict(os.environ, {"HF_TOKEN": "hf_test"}),
+          patch("interview_local.pipeline.worker", models or gated_speech_models(HF_TOKEN)),
+          patch("interview_local.llm.OllamaClient", lambda: llm(paragraphs)),
+          patch("interview_local.models.local_diarization_model", lambda: None),
+          patch.dict(os.environ, {"HF_TOKEN": HF_TOKEN}),
+          redirect_stdout(stdout), redirect_stderr(stderr)):
+        code = main()
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
+def run_cli_without_credentials(*arguments, models):
+    """Run the command line without HF_TOKEN or a cached login; asking for a token fails the run."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    environment = {key: value for key, value in os.environ.items() if key != "HF_TOKEN"}
+    with (patch.object(sys, "argv", ["interview-local", *map(str, arguments)]),
+          patch("interview_local.pipeline.worker", models),
+          patch("interview_local.models.local_diarization_model", lambda: None),
+          patch("huggingface_hub.get_token", lambda: None),
+          patch("interview_local.cli.getpass.getpass", unanswered_token_prompt),
+          patch.dict(os.environ, environment, clear=True),
           redirect_stdout(stdout), redirect_stderr(stderr)):
         code = main()
     return code, stdout.getvalue(), stderr.getvalue()
@@ -91,6 +124,12 @@ class OptionTests(CommandLineTestCase):
               patch("interview_local.web.server.webbrowser.open")):
             code, printed, _ = run_cli("--web", "--runs-dir", self.root / "runs")
         self.assertEqual((code, f"Runs are saved in {(self.root / 'runs').resolve()}" in printed), (0, True))
+
+    def test_web_ui_serves_transcripts_in_the_working_directory_by_default(self):
+        with (patch("interview_local.web.server.EditorServer", StoppedServer),
+              patch("interview_local.web.server.webbrowser.open"), chdir(self.root)):
+            _, printed, _ = run_cli("--web")
+        self.assertIn(f"Runs are saved in {(self.root / 'transcripts').resolve()}", printed)
 
     def test_audio_together_with_a_saved_stage_command_is_rejected(self):
         code, _, error = run_cli(self.audio, "--rename", self.root / "speakers.json")
@@ -147,10 +186,19 @@ class SavedStageTests(CommandLineTestCase):
         code, _, _ = run_cli("--enhance", source, "--output", self.output, paragraphs=TWO_PARAGRAPHS)
         self.assertEqual((code, self.saved("03_readable.json")["stage"]), (0, "readable"))
 
+    def test_enhancement_prints_the_readable_draft(self):
+        source = write_json(self.root / "02_speakers.json", speaker_transcript())
+        _, printed, _ = run_cli("--enhance", source, "--output", self.output, paragraphs=TWO_PARAGRAPHS)
+        self.assertIn(readable_text(self.saved("03_readable.json")), printed)
+
     def test_enhancement_requires_a_speaker_transcript(self):
-        source = write_json(self.root / "02_speakers.json", {"segments": []})
-        code, _, error = run_cli("--enhance", source, "--output", self.output)
-        self.assertEqual((code, "Enhancement requires" in error), (1, True))
+        for case, transcript in (("raw transcript", {"segments": []}),
+                                 ("no words", {"speakers": {"A": "Anna"}, "segments": []}),
+                                 ("no speakers", {"words": [], "segments": []})):
+            with self.subTest(case):
+                source = write_json(self.root / "02_speakers.json", transcript)
+                code, _, error = run_cli("--enhance", source, "--output", self.output)
+                self.assertEqual((code, "Enhancement requires" in error), (1, True))
 
     def test_renaming_saves_the_entered_names(self):
         source = write_json(self.root / "02_speakers.json", speaker_transcript())
@@ -163,9 +211,17 @@ class SavedStageTests(CommandLineTestCase):
         self.assertEqual(("] Anna\n" in printed, "] Bernd\n" in printed), (True, True))
 
     def test_renaming_requires_a_speaker_transcript(self):
-        source = write_json(self.root / "02_speakers.json", {"words": []})
-        code, _, error = run_cli("--rename", source, "--output", self.output)
-        self.assertEqual((code, "Renaming requires" in error), (1, True))
+        for case, transcript in (("words only", {"words": []}), ("no segments", {"speakers": {}, "words": []}),
+                                 ("no speakers", {"segments": [], "words": []})):
+            with self.subTest(case):
+                source = write_json(self.root / "02_speakers.json", transcript)
+                code, _, error = run_cli("--rename", source, "--output", self.output)
+                self.assertEqual((code, "Renaming requires" in error), (1, True))
+
+    def test_review_prints_the_reviewed_draft(self):
+        readable = write_json(self.root / "03_readable.json", readable_transcript(TWO_PARAGRAPHS))
+        _, printed, _ = run_cli("--review", readable, "--output", self.output, paragraphs=TWO_PARAGRAPHS)
+        self.assertIn(readable_text(self.saved("04_review.json")), printed)
 
 
 class TranscriptionTests(CommandLineTestCase):
@@ -175,8 +231,74 @@ class TranscriptionTests(CommandLineTestCase):
 
     def test_raw_only_prints_the_raw_transcript_and_stops(self):
         code, printed, _ = run_cli(self.audio, "--raw-only", "--output", self.output)
-        stopped = not (self.output / "02_speakers.json").exists()
-        self.assertEqual((code, "Guten Tag" in printed, stopped), (0, True, True))
+        saved = sorted(p.name for p in self.output.iterdir())
+        raw_text = (self.output / "01_raw.txt").read_text(encoding="utf-8")
+        self.assertEqual((code, raw_text in printed, saved), (0, True, ["01_raw.json", "01_raw.txt"]))
+
+    def test_transcription_prints_the_readable_draft(self):
+        _, printed, _ = run_cli(self.audio, "--output", self.output)
+        self.assertIn(readable_text(self.saved("03_readable.json")), printed)
+
+    def test_alignment_option_aligns_the_words(self):
+        run_cli(self.audio, "--align", "--no-llm", "--output", self.output)
+        metadata = self.saved("02_speakers.json")["metadata"]
+        self.assertEqual((metadata["alignment"], metadata["word_timing_counts"]), (True, {"aligned": 2}))
+
+    def test_transcription_without_alignment_option_records_no_alignment(self):
+        for case, options in (("default", ()), ("--no-align", ("--no-align",))):
+            with self.subTest(case):
+                output = self.root / case
+                code, _, _ = run_cli(self.audio, *options, "--no-llm", "--output", output)
+                metadata = json.loads((output / "02_speakers.json").read_text(encoding="utf-8"))["metadata"]
+                self.assertEqual((code, metadata["alignment"]), (0, False))
+
+    def test_offline_transcription_uses_only_cached_models(self):
+        for case, options in (("speakers", ("--no-llm",)), ("raw only", ("--raw-only",))):
+            with self.subTest(case):
+                code, _, error = run_cli(self.audio, "--offline", *options, "--output", self.root / case,
+                                         models=uncached_speech_models())
+                self.assertEqual((code, "not in the local cache" in error), (1, True))
+
+    def test_offline_transcription_never_asks_for_an_hf_token(self):
+        code, _, _ = run_cli_without_credentials(self.audio, "--offline", "--no-llm", "--output", self.output,
+                                                 models=speech_models())
+        self.assertEqual(code, 0)
+
+    def test_unreachable_local_llm_stops_the_run_before_the_speech_models(self):
+        code, _, _ = run_cli(self.audio, "--output", self.output, llm=UnreachableClient)
+        self.assertEqual((code, self.output.exists()), (1, False))
+
+    def test_without_llm_an_unreachable_local_llm_is_not_needed(self):
+        code, _, _ = run_cli(self.audio, "--no-llm", "--output", self.output, llm=UnreachableClient)
+        self.assertEqual(code, 0)
+
+    def test_asked_unquoted_path_with_spaces_is_found(self):
+        spaced = self.root / "my interview.wav"
+        spaced.touch()
+        code, _, _ = run_cli("--no-llm", "--output", self.output, answers=(str(spaced), "Anna", "Bernd"))
+        self.assertEqual(code, 0)
+
+    def test_asked_windows_path_keeps_its_backslashes(self):
+        windows_path = self.root / "Interviews\\interview.wav"
+        windows_path.touch()
+        with patch("interview_local.cli.os", WINDOWS_OS):
+            code, _, _ = run_cli("--no-llm", "--output", self.output, answers=(str(windows_path), "Anna", "Bernd"))
+        self.assertEqual(code, 0)
+
+    def test_asked_quoted_windows_path_keeps_its_drive_letter(self):
+        relative_drive_path = "X:\\Interviews\\interview.wav"
+        (self.root / relative_drive_path).touch()
+        with patch("interview_local.cli.os", WINDOWS_OS), chdir(self.root):
+            code, _, _ = run_cli("--no-llm", "--output", self.output,
+                                 answers=(f'"{relative_drive_path}"', "Anna", "Bernd"))
+        self.assertEqual(code, 0)
+
+    def test_asked_windows_path_may_be_quoted(self):
+        spaced = self.root / "my interview.wav"
+        spaced.touch()
+        with patch("interview_local.cli.os", WINDOWS_OS):
+            code, _, _ = run_cli("--no-llm", "--output", self.output, answers=(f'"{spaced}"', "Anna", "Bernd"))
+        self.assertEqual(code, 0)
 
     def test_without_llm_the_named_speaker_transcript_is_printed(self):
         code, printed, _ = run_cli(self.audio, "--no-llm", "--name-a", "Anna", "--output", self.output)

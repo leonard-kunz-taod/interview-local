@@ -11,16 +11,47 @@ ASR_OUTPUT = {"segments": [dict(start=0, end=1, text="Guten Tag", words=[
     dict(start=.5, end=1, text="Tag", timing="whisper", probability=.4)])], "language": "de"}
 DIARIZATION_OUTPUT = {"exclusive": [dict(start=0, end=1, speaker="s0")],
                       "regular": [dict(start=0, end=1, speaker="s0")]}
-STAGE_OUTPUTS = {"decode": "", "asr": json.dumps(ASR_OUTPUT), "diarize": json.dumps(DIARIZATION_OUTPUT)}
+ALIGNMENT_OUTPUT = [{"start": 0, "end": .5, "text": "Guten", "timing": "aligned", "probability": None},
+                    {"start": .5, "end": 1, "text": "Tag", "timing": "aligned", "probability": None}]
+STAGE_OUTPUTS = {"decode": "", "asr": json.dumps(ASR_OUTPUT), "align": json.dumps(ALIGNMENT_OUTPUT),
+                 "diarize": json.dumps(DIARIZATION_OUTPUT)}
+AUDIO_READING_STAGES = {"decode", "asr", "align", "diarize"}
+GATED_STAGES = {"diarize", "prepare-diarize"}
 
 
 def speech_models(failing_stage=None):
-    """Stand-in for the model worker processes: writes the outputs the real stages produce."""
-    def worker(stage, source, target, *args):
+    """Stand-in for the model worker processes: like the real stages, each reads its input file, reports
+    progress and writes the output the real stage produces."""
+    def worker(stage, source, target, status, token, offline=False):
         if stage == failing_stage:
             raise RuntimeError(f"Stage '{stage}' failed: model unavailable")
+        if stage in AUDIO_READING_STAGES and not source.is_file():
+            raise RuntimeError(f"Stage '{stage}' failed: {source} does not exist")
+        status(f"Loading {stage} model")
         if stage in STAGE_OUTPUTS:
             target.write_text(STAGE_OUTPUTS[stage])
+    return worker
+
+
+def gated_speech_models(access_token):
+    """Speech-model stand-in whose speaker recognition, like the gated pyannote model, needs the HF token."""
+    models = speech_models()
+
+    def worker(stage, source, target, status, token, offline=False):
+        if stage in GATED_STAGES and token != access_token:
+            raise RuntimeError(f"Stage '{stage}' failed: 401 Unauthorized")
+        models(stage, source, target, status, token, offline)
+    return worker
+
+
+def uncached_speech_models():
+    """Speech-model stand-in with an empty model cache: every stage fails when downloads are forbidden."""
+    models = speech_models()
+
+    def worker(stage, source, target, status, token, offline=False):
+        if offline:
+            raise RuntimeError(f"Stage '{stage}' failed: model not in the local cache")
+        models(stage, source, target, status, token, offline)
     return worker
 
 

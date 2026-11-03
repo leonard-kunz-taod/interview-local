@@ -132,7 +132,7 @@ Span = TypeVar("Span")
 def _spans_near(word: Word, spans: list[Span], starts: list[float]) -> list[Span]:
     """Spans sorted by start, from the last one starting at or before the word through the last one starting
     no later than its end."""
-    first = max(0, bisect.bisect_right(starts, word.start) - 1)
+    first = max(0, bisect.bisect_right(starts, word.start) - 1)  # pragma: no mutate - an earlier first only adds spans every caller drops via _touches; a later first is killed by the speaker tests
     return spans[first:bisect.bisect_right(starts, word.end)]
 
 

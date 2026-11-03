@@ -84,7 +84,7 @@ def _stored_corrections(run_dir: Path, readable: dict) -> dict | None:
     if not path.exists():
         return None
     stored = json.loads(path.read_text(encoding="utf-8"))
-    _require_supported_format(stored, path)
+    _require_supported_format(stored, path)  # pragma: no mutate - path only names the file in the error message
     if stored.get("readable_sha256") != fingerprint(readable):
         raise ValueError(f"{path} belongs to a different readable transcript; 03_readable.json has changed.")
     return stored

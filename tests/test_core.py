@@ -3,34 +3,60 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from interview_local.core import Word, Turn, merge, export, timestamp
+from interview_local.core import AMBIGUOUS_OVERLAP_RATIO, Word, Turn, merge, export, timestamp
+
+SPEAKER_CHANGE_WORDS = [Word(.2, .6, "Guten", .9, "whisper"), Word(.6, .9, "Tag.", .9, "whisper"),
+                         Word(.95, 1.3, "Hallo!", .9, "whisper"), Word(5, 5.2, "Echo", .9, "whisper")]
+SPEAKER_CHANGE_TURNS = [Turn(0, 1, "cluster9"), Turn(1, 3, "cluster2")]
+
 
 class MergeTests(unittest.TestCase):
-    def test_speaker_change_overlap_and_gap(self):
-        turns = [Turn(0, 1, "cluster9"), Turn(1, 3, "cluster2")]
-        result = merge([Word(.2,.6,"Guten",.9, "whisper"), Word(.6,.9,"Tag.",.9, "whisper"),
-                        Word(.95,1.3,"Hallo!",.9, "whisper"), Word(5,5.2,"Echo",.9, "whisper")], turns, [])
-        self.assertEqual([w["speaker"] for w in result["words"]], ["A","A","B",None])
-        self.assertEqual(result["segments"][0]["text"], "Guten Tag.")
-        self.assertTrue(result["words"][-1]["uncertain"])
+    def test_words_take_the_speaker_of_their_most_overlapping_turn(self):
+        result = merge(SPEAKER_CHANGE_WORDS[:3], SPEAKER_CHANGE_TURNS, [])
+        self.assertEqual([w["speaker"] for w in result["words"]], ["A", "A", "B"])
 
-    def test_tie_is_flagged_and_zero_length_preserved(self):
-        result = merge([Word(.5,1.5,"Ja",.9, "whisper"), Word(1,1,"42",None,"estimated")],
-                       [Turn(0,1,"x"), Turn(1,2,"y")], [])
-        self.assertTrue(result["words"][0]["uncertain"])
-        self.assertEqual(result["words"][1]["speaker"], "B")
-        self.assertTrue(result["words"][1]["uncertain"])
+    def test_word_after_every_turn_is_unassigned_and_uncertain(self):
+        word = merge(SPEAKER_CHANGE_WORDS, SPEAKER_CHANGE_TURNS, [])["words"][-1]
+        self.assertEqual((word["speaker"], word["uncertain"]), (None, True))
 
-    def test_empty_and_export_renames(self):
-        self.assertEqual(merge([],[], [])["segments"], [])
-        result = merge([Word(0,1,"Grüße",.9, "whisper")], [Turn(0,2,"x")], [])
+    def test_speaker_change_starts_a_new_segment(self):
+        result = merge(SPEAKER_CHANGE_WORDS, SPEAKER_CHANGE_TURNS, [])
+        self.assertEqual([s["text"] for s in result["segments"]], ["Guten Tag.", "Hallo!", "Echo"])
+
+    def test_zero_length_word_on_a_turn_boundary_takes_the_starting_turn(self):
+        result = merge([Word(1, 1, "42", None, "estimated")], [Turn(0, 1, "x"), Turn(1, 2, "y")], [])
+        self.assertEqual(result["words"][0]["speaker"], "B")
+
+    def test_zero_length_word_at_the_end_of_the_last_turn_is_unassigned(self):
+        result = merge([Word(2, 2, "42", None, "estimated")], [Turn(0, 2, "x")], [])
+        self.assertEqual(result["words"][0]["speaker"], None)
+
+    def test_no_words_give_no_segments(self):
+        self.assertEqual(merge([], [], [])["segments"], [])
+
+    def test_speaker_transcript_lists_speakers_segments_words_and_diarization(self):
+        result = merge([Word(0, 1, "Ja", .9, "whisper")], [Turn(0, 2, "x")], [])
+        word = {"word_id": 0, "start": 0, "end": 1, "text": "Ja", "speaker": "A", "timing": "whisper", "probability": .9,
+                    "uncertain": False, "uncertainty_reasons": [], "overlap": False, "overlap_speakers": []}
+        segment = {"start": 0, "end": 1, "text": "Ja", "speaker": "A", "uncertain": False, "overlap": False, "word_ids": [0]}
+        self.assertEqual(result, {"schema_version": 2, "language": "de", "speakers": {"A": "Speaker A"},
+                                      "segments": [segment], "words": [word],
+                                      "diarization": [{"start": 0, "end": 2, "speaker": "A"}], "regular_diarization": [],
+                                      "overlaps": [], "overlap_detection_available": True})
+
+
+class ExportTests(unittest.TestCase):
+    def test_export_keeps_renamed_speakers_and_umlauts_in_both_files(self):
+        result = merge([Word(0, 1, "Grüße", .9, "whisper")], [Turn(0, 2, "x")], [])
         result["speakers"]["A"] = "Änne"
         with tempfile.TemporaryDirectory() as d:
             export(result, Path(d))
-            self.assertIn("Änne", (Path(d)/"transcript.txt").read_text(encoding="utf-8"))
-            decoded = json.loads((Path(d)/"transcript.json").read_text(encoding="utf-8"))
-            self.assertEqual(decoded["words"][0]["text"], "Grüße")
-            self.assertEqual(decoded["speakers"]["A"], "Änne")
+            text = (Path(d) / "transcript.txt").read_text(encoding="utf-8")
+            decoded = json.loads((Path(d) / "transcript.json").read_text(encoding="utf-8"))
+        self.assertEqual(("Änne" in text, decoded["words"][0]["text"], decoded["speakers"]["A"]),
+                         (True, "Grüße", "Änne"))
+
+    def test_timestamp_rounds_up_to_the_next_hour(self):
         self.assertEqual(timestamp(3599.9996), "01:00:00.000")
 
 class WordProbabilityTests(unittest.TestCase):
@@ -87,6 +113,20 @@ class UncertaintyTests(unittest.TestCase):
         self.assertEqual(self.reasons([Word(5, 4, "Ja", .9, "whisper")], [Turn(0, 2, "x")]),
                          [["no_matching_speaker", "invalid_word_duration"]])
 
+    def test_tie_between_two_turns_is_an_ambiguous_speaker_boundary(self):
+        self.assertEqual(self.reasons([Word(.5, 1.5, "Ja", .9, "whisper")], [Turn(0, 1, "x"), Turn(1, 2, "y")]),
+                         [["ambiguous_speaker_boundary"]])
+
+    def test_runner_up_overlapping_exactly_the_ambiguity_ratio_is_ambiguous(self):
+        best_overlap = 1.25
+        runner_up_overlap = best_overlap * AMBIGUOUS_OVERLAP_RATIO
+        word = Word(2 - best_overlap, 2 + runner_up_overlap, "Ja", .9, "whisper")
+        self.assertEqual(self.reasons([word], [Turn(0, 2, "x"), Turn(2, 4, "y")]), [["ambiguous_speaker_boundary"]])
+
+    def test_zero_length_word_has_an_invalid_duration(self):
+        self.assertEqual(self.reasons([Word(1, 1, "Ja", .9, "whisper")], [Turn(0, 2, "x")]),
+                         [["invalid_word_duration"]])
+
     def test_clear_majority_overlap_is_not_ambiguous(self):
         self.assertEqual(self.reasons([Word(.5, 1.1, "Ja", .9, "whisper")], [Turn(0, 1, "x"), Turn(1, 2, "y")]), [[]])
 
@@ -119,6 +159,25 @@ class SegmentTests(unittest.TestCase):
         segment = result["segments"][0]
         self.assertEqual((segment["start"], segment["end"], segment["uncertain"], segment["overlap"]),
                          (0, 1.5, True, False))
+
+    def test_empty_word_inside_a_segment_does_not_end_it(self):
+        words = [Word(0, .5, "Ja", .9, "whisper"), Word(.5, 1, " ", .9, "whisper"), Word(1, 1.5, "nein", .9, "whisper")]
+        self.assertEqual(self.segment_texts(words, [Turn(0, 2, "x")]), ["Ja nein"])
+
+    def test_segment_lists_the_ids_of_its_words(self):
+        result = merge([Word(0, .5, "Ja", .9, "whisper"), Word(.5, 1, "gut", .9, "whisper")], [Turn(0, 2, "x")], [])
+        self.assertEqual(result["segments"][0]["word_ids"], [0, 1])
+
+    def test_segment_is_uncertain_when_its_first_word_is(self):
+        result = merge([Word(0, 1, "Ja", None, "estimated"), Word(1, 1.5, "nein", .9, "whisper")], [Turn(0, 2, "x")], [])
+        self.assertEqual(result["segments"][0]["uncertain"], True)
+
+    def test_segment_overlaps_when_any_of_its_words_overlaps(self):
+        words = [Word(0, .5, "Ja", .9, "whisper"), Word(1.5, 2, "gut", .9, "whisper")]
+        for case, second_voice in (("first word overlaps", Turn(0, 1, "y")), ("last word overlaps", Turn(1.5, 3, "y"))):
+            with self.subTest(case):
+                result = merge(words, [Turn(0, 3, "x")], [Turn(0, 3, "x"), second_voice])
+                self.assertEqual([s["overlap"] for s in result["segments"]], [True])
 
 
 if __name__ == "__main__":

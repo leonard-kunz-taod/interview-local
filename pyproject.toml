@@ -13,3 +13,23 @@ interview-local = "interview_local.cli:main"
 include = ["interview_local*"]
 [tool.setuptools.package-data]
 "interview_local.web" = ["static/*"]
+
+[tool.mutmut]
+source_paths = ["interview_local/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# Message wording shown to people: error messages, fixed-text and status prints, prompts, CLI help.
+# The text is presentation, not contract; tests assert the outcome (status, exception type, state).
+do_not_mutate_patterns = [
+    'raise \w+\((HTTPStatus\.\w+,\s*)?(f?"|[A-Z_]+\)|$)',
+    'return \w*Error\(f?"',
+    '\bprint\(f?"(?!.*file=sys\.stderr)',
+    '\bstatus\(f?"',
+    '\binput\("',
+    '\b(help|description)="',
+    # Equivalent by specification: HTTP field names are case-insensitive (RFC 9110 5.1), so are codec names.
+    '(send_header|headers\.get)\("[A-Z][A-Za-z-]*"',
+    '\.(en|de)code\("utf-8"\)',
+]
+
+[tool.pytest.ini_options]
+addopts = "--ignore=mutants"

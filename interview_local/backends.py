@@ -104,7 +104,7 @@ class GermanWhisperXAligner:
             return fallback_words(segment)
         duration = len(chunk) / recording.samplerate
         aligned = align([dict(start=0., end=duration, text=segment["text"])],
-                        self.model, self.metadata, chunk, "cpu", return_char_alignments=False)
+                        self.model, self.metadata, chunk, "cpu", return_char_alignments=False)  # pragma: no mutate - character alignments only add data next to word_segments, which is all this code reads
         aligned_words = aligned["word_segments"]
         # Preserve all words, including numbers and unalignable characters.
         if not keeps_every_character(aligned_words, segment["text"]):

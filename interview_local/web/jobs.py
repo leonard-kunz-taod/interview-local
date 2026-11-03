@@ -40,7 +40,7 @@ class TranscriptionJob:
         self._lock = threading.Lock()
         self._state: JobState = "running"
         self._phase: JobPhase = PHASE_SPEECH_RECOGNITION
-        self._detail = "Starting"
+        self._detail = "Starting"  # pragma: no mutate - progress wording shown to the user
         self._error: str | None = None
 
     def start(self) -> None:
@@ -70,7 +70,7 @@ class TranscriptionJob:
             return
         with self._lock:
             self._state = "done"
-            self._detail = "Done"
+            self._detail = "Done"  # pragma: no mutate - progress wording shown to the user
 
     def _transcribe(self) -> None:
         client = OllamaClient()
