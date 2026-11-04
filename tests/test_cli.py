@@ -1,30 +1,105 @@
-from contextlib import chdir, redirect_stderr, redirect_stdout
+# German fixtures intentionally exercise non-ASCII speech and speaker names.
+import contextlib
 import io
 import json
 import os
-from pathlib import Path
+import re
 import sys
 import tempfile
-from types import SimpleNamespace
+import types
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from support.fake_ollama import IDENTITY, FakeOllama, served_by
+from support.fake_worker import OUTPUTS, SPOKEN_OUTPUTS, FakeWorker
+from support.model_folders import bundled_local_model, without_local_model
+from support.platform_encoding import windows_default_encoding
+from support.platform_files import case_sensitive_file_names
+
+from interview_local import cli
 from interview_local.artifacts import readable_text
 from interview_local.cli import main
-from interview_local.core import merge
-from run_fixtures import (INTERVIEW_TURNS, TWO_PARAGRAPHS, ScriptedClient, gated_speech_models, interview_words,
-                          readable_transcript, speech_models, uncached_speech_models)
+from interview_local.core import Turn, Word, merge, render
+from interview_local.llm import MODEL, enhance
 
-SPEECH_PARAGRAPHS = [(0, 1, "A", "Guten Tag.")]
-HF_TOKEN = "hf_test"
-WINDOWS_OS = SimpleNamespace(**{**vars(os), "name": "nt"})
+TOKEN = "hf_environmentToken"
+SPEAKER_FILES = [
+    "02_speakers.json",
+    "02_speakers.txt",
+    "transcript.json",
+    "transcript.txt",
+]
+TIMESTAMPED_FOLDER = r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{6}"
 
 
-class PreparingClient(ScriptedClient):
-    """A local LLM that downloads its model instantly."""
+def run_cli(*arguments):
+    code, stdout, stderr = run_cli_streams(*arguments)
+    return code, stdout + stderr
 
-    def prepare(self, status=print):
-        status("Ministral downloaded")
+
+def run_cli_streams(*arguments):
+    """Exit code, standard output and standard error of one command line."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with (
+        patch("sys.argv", ["interview-local", *map(str, arguments)]),
+        contextlib.redirect_stdout(stdout),
+        contextlib.redirect_stderr(stderr),
+    ):
+        code = main()
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
+def error_line(output):
+    return next(line for line in output.splitlines() if line.startswith("Error:"))
+
+
+def saved_stage(directory, name, value):
+    path = Path(directory) / name
+    path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def saved_json(path):
+    return json.loads(path.read_text("utf-8"))
+
+
+def speaker_transcript():
+    return merge(
+        [
+            Word(0, 0.3, "Hallo", 0.9, "whisper"),
+            Word(0.3, 0.7, "zusammen.", 0.9, "whisper"),
+        ],
+        [Turn(0, 1, "s")],
+        [],
+    )
+
+
+class ArgumentTests(unittest.TestCase):
+    def test_audio_combined_with_a_saved_stage_command_is_rejected(self):
+        code, output = run_cli("audio.wav", "--rename", "speakers.json")
+        self.assertEqual(
+            (code, output),
+            (
+                1,
+                (
+                    "Error: Supply audio or a saved-stage command, not both.\n"
+                    "Completed earlier stages remain on disk, if any.\n"
+                ),
+            ),
+        )
+
+    def test_errors_are_written_to_standard_error(self):
+        code, stdout, stderr = run_cli_streams("audio.wav", "--rename", "x.json")
+        self.assertEqual(
+            (code, stdout, stderr.splitlines()[0]),
+            (1, "", "Error: Supply audio or a saved-stage command, not both."),
+        )
+
+    def test_offline_preparation_is_rejected(self):
+        code, _ = run_cli("--prepare", "--offline")
+        self.assertEqual(code, 1)
 
 
 class StoppedServer:
@@ -42,284 +117,586 @@ class StoppedServer:
         pass
 
 
-def cancelled_input(prompt):
-    raise KeyboardInterrupt
-
-
-class UnreachableClient(ScriptedClient):
-    """A local LLM service that is not running."""
-
-    def ready(self):
-        raise RuntimeError("Ollama is not running")
-
-
-def unanswered_token_prompt(prompt):
-    raise AssertionError("The run asked for an HF token.")
-
-
-def run_cli(*arguments, answers=(), paragraphs=SPEECH_PARAGRAPHS, models=None, llm=PreparingClient):
-    """Run the command line with stand-ins for the speech models and the local LLM.
-
-    The HF token comes from HF_TOKEN; there is no local diarization model, and the stand-in for the gated
-    speaker-recognition model accepts only that token.
-
-    Returns:
-        The exit code, standard output and standard error.
-    """
-    stdout, stderr = io.StringIO(), io.StringIO()
-    typed = iter(answers)
-    with (patch.object(sys, "argv", ["interview-local", *map(str, arguments)]),
-          patch("builtins.input", lambda prompt: next(typed)),
-          patch("interview_local.pipeline.worker", models or gated_speech_models(HF_TOKEN)),
-          patch("interview_local.llm.OllamaClient", lambda: llm(paragraphs)),
-          patch("interview_local.models.local_diarization_model", lambda: None),
-          patch.dict(os.environ, {"HF_TOKEN": HF_TOKEN}),
-          redirect_stdout(stdout), redirect_stderr(stderr)):
-        code = main()
-    return code, stdout.getvalue(), stderr.getvalue()
-
-
-def run_cli_without_credentials(*arguments, models):
-    """Run the command line without HF_TOKEN or a cached login; asking for a token fails the run."""
-    stdout, stderr = io.StringIO(), io.StringIO()
-    environment = {key: value for key, value in os.environ.items() if key != "HF_TOKEN"}
-    with (patch.object(sys, "argv", ["interview-local", *map(str, arguments)]),
-          patch("interview_local.pipeline.worker", models),
-          patch("interview_local.models.local_diarization_model", lambda: None),
-          patch("huggingface_hub.get_token", lambda: None),
-          patch("interview_local.cli.getpass.getpass", unanswered_token_prompt),
-          patch.dict(os.environ, environment, clear=True),
-          redirect_stdout(stdout), redirect_stderr(stderr)):
-        code = main()
-    return code, stdout.getvalue(), stderr.getvalue()
-
-
-def write_json(path, value):
-    path.write_text(json.dumps(value), encoding="utf-8")
-    return path
-
-
-def speaker_transcript():
-    return merge(interview_words(), INTERVIEW_TURNS, [])
-
-
-class CommandLineTestCase(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.directory.name)
-        self.output = self.root / "output"
-        self.audio = self.root / "interview.wav"
-        self.audio.touch()
-
-    def tearDown(self):
-        self.directory.cleanup()
-
-    def saved(self, name):
-        return json.loads((self.output / name).read_text(encoding="utf-8"))
-
-
-class OptionTests(CommandLineTestCase):
+class WebOptionTests(unittest.TestCase):
     def test_web_ui_serves_the_resolved_runs_directory(self):
-        with (patch("interview_local.web.server.EditorServer", StoppedServer),
-              patch("interview_local.web.server.webbrowser.open")):
-            code, printed, _ = run_cli("--web", "--runs-dir", self.root / "runs")
-        self.assertEqual((code, f"Runs are saved in {(self.root / 'runs').resolve()}" in printed), (0, True))
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("interview_local.web.server.EditorServer", StoppedServer),
+            patch("interview_local.web.server.webbrowser.open"),
+        ):
+            runs = Path(directory) / "runs"
+            code, printed = run_cli("--web", "--runs-dir", runs)
+            self.assertEqual(
+                (code, f"Runs are saved in {runs.resolve()}" in printed), (0, True)
+            )
 
     def test_web_ui_serves_transcripts_in_the_working_directory_by_default(self):
-        with (patch("interview_local.web.server.EditorServer", StoppedServer),
-              patch("interview_local.web.server.webbrowser.open"), chdir(self.root)):
-            _, printed, _ = run_cli("--web")
-        self.assertIn(f"Runs are saved in {(self.root / 'transcripts').resolve()}", printed)
-
-    def test_audio_together_with_a_saved_stage_command_is_rejected(self):
-        code, _, error = run_cli(self.audio, "--rename", self.root / "speakers.json")
-        self.assertEqual((code, "Supply audio or a saved-stage command" in error), (1, True))
-
-    def test_preparation_offline_is_rejected(self):
-        code, _, error = run_cli("--offline", "--prepare-llm")
-        self.assertEqual((code, "do not combine it with --offline" in error), (1, True))
-
-    def test_doctor_reports_and_exits(self):
-        with patch("interview_local.cli.doctor", lambda: print("Doctor report")):
-            code, printed, _ = run_cli("--doctor")
-        self.assertEqual((code, printed), (0, "Doctor report\n"))
-
-    def test_gui_launches_when_tk_is_available(self):
-        gui = SimpleNamespace(launch=lambda: print("GUI closed"))
-        with patch.dict(sys.modules, {"interview_local.gui": gui}):
-            code, printed, _ = run_cli("--gui")
-        self.assertEqual((code, printed), (0, "GUI closed\n"))
-
-    def test_gui_without_tk_falls_back_to_the_terminal(self):
-        with patch.dict(sys.modules, {"interview_local.gui": None}):
-            code, printed, _ = run_cli("--gui", "--prepare-llm")
-        self.assertEqual((code, "Falling back to the terminal dialog" in printed, "Preparation complete." in printed),
-                         (0, True, True))
-
-    def test_speech_model_preparation_checks_every_stage(self):
-        code, printed, _ = run_cli("--prepare", "--align")
-        checked = [line.split(": ")[1] for line in printed.splitlines() if line.startswith("Model download")]
-        self.assertEqual((code, checked), (0, ["prepare-diarize", "prepare-asr", "prepare-align"]))
-
-    def test_llm_preparation_downloads_the_model(self):
-        code, printed, _ = run_cli("--prepare-llm")
-        self.assertEqual((code, printed), (0, "Ministral downloaded\nPreparation complete.\n"))
-
-    def test_ctrl_c_cancels_with_exit_code_130(self):
-        with patch("builtins.input", cancelled_input):
-            stderr = io.StringIO()
-            with (patch.object(sys, "argv", ["interview-local"]), redirect_stdout(io.StringIO()),
-                  redirect_stderr(stderr)):
-                code = main()
-        self.assertEqual((code, "Processing cancelled" in stderr.getvalue()), (130, True))
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("interview_local.web.server.EditorServer", StoppedServer),
+            patch("interview_local.web.server.webbrowser.open"),
+            contextlib.chdir(directory),
+        ):
+            _, printed = run_cli("--web")
+            expected = Path(directory, "transcripts").resolve()
+            self.assertIn(f"Runs are saved in {expected}", printed)
 
 
-class SavedStageTests(CommandLineTestCase):
-    def test_review_saves_the_reviewed_draft(self):
-        readable = write_json(self.root / "03_readable.json", readable_transcript(TWO_PARAGRAPHS))
-        code, printed, _ = run_cli("--review", readable, "--output", self.output, paragraphs=TWO_PARAGRAPHS)
-        self.assertEqual((code, self.saved("04_review.json")["stage"], "Review saved to" in printed),
-                         (0, "review", True))
+class RenameTests(unittest.TestCase):
+    def renamed(self, transcript, names, *options):
+        """Exit code, printed output and the saved speaker stage of a rename."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", transcript)
+            output = Path(directory) / "renamed"
+            with patch("builtins.input", side_effect=names):
+                code, printed = run_cli(
+                    "--rename", source, "--output", output, *options
+                )
+            saved_file = output / "02_speakers.json"
+            saved = saved_json(saved_file) if saved_file.exists() else None
+        return code, printed, saved
 
-    def test_enhancement_saves_a_readable_draft(self):
-        source = write_json(self.root / "02_speakers.json", speaker_transcript())
-        code, _, _ = run_cli("--enhance", source, "--output", self.output, paragraphs=TWO_PARAGRAPHS)
-        self.assertEqual((code, self.saved("03_readable.json")["stage"]), (0, "readable"))
+    def test_rename_saves_the_speaker_stage_and_its_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            output = Path(directory) / "renamed"
+            with patch("builtins.input", side_effect=["Änne", "Bernd"]):
+                run_cli("--rename", source, "--output", output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(saved, SPEAKER_FILES)
 
-    def test_enhancement_prints_the_readable_draft(self):
-        source = write_json(self.root / "02_speakers.json", speaker_transcript())
-        _, printed, _ = run_cli("--enhance", source, "--output", self.output, paragraphs=TWO_PARAGRAPHS)
-        self.assertIn(readable_text(self.saved("03_readable.json")), printed)
+    def test_rename_applies_the_entered_names(self):
+        _, _, saved = self.renamed(speaker_transcript(), ["Änne", "Bernd"])
+        self.assertEqual(saved["speakers"], {"A": "Änne", "B": "Bernd"})
 
-    def test_enhancement_requires_a_speaker_transcript(self):
-        for case, transcript in (("raw transcript", {"segments": []}),
-                                 ("no words", {"speakers": {"A": "Anna"}, "segments": []}),
-                                 ("no speakers", {"words": [], "segments": []})):
-            with self.subTest(case):
-                source = write_json(self.root / "02_speakers.json", transcript)
-                code, _, error = run_cli("--enhance", source, "--output", self.output)
-                self.assertEqual((code, "Enhancement requires" in error), (1, True))
+    def test_empty_name_entry_keeps_the_default_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            output = Path(directory) / "renamed"
+            with patch("builtins.input", side_effect=["", "Bernd"]):
+                run_cli("--rename", source, "--output", output)
+            saved = json.loads((output / "transcript.json").read_text("utf-8"))
+        self.assertEqual(saved["speakers"], {"A": "Speaker A", "B": "Bernd"})
 
-    def test_renaming_saves_the_entered_names(self):
-        source = write_json(self.root / "02_speakers.json", speaker_transcript())
-        code, _, _ = run_cli("--rename", source, "--output", self.output, answers=("Anna", ""))
-        self.assertEqual((code, self.saved("02_speakers.json")["speakers"]), (0, {"A": "Anna", "B": "Speaker B"}))
+    def test_empty_name_entries_keep_both_default_names(self):
+        _, _, saved = self.renamed(speaker_transcript(), ["", ""])
+        self.assertEqual(saved["speakers"], {"A": "Speaker A", "B": "Speaker B"})
 
-    def test_renaming_prints_the_renamed_transcript(self):
-        source = write_json(self.root / "02_speakers.json", speaker_transcript())
-        _, printed, _ = run_cli("--rename", source, "--output", self.output, answers=("Anna", "Bernd"))
-        self.assertEqual(("] Anna\n" in printed, "] Bernd\n" in printed), (True, True))
+    def test_rename_prints_the_renamed_transcript(self):
+        _, printed, saved = self.renamed(speaker_transcript(), ["Änne", "Bernd"])
+        self.assertIn(render(saved), printed)
 
-    def test_renaming_requires_a_speaker_transcript(self):
-        for case, transcript in (("words only", {"words": []}), ("no segments", {"speakers": {}, "words": []}),
-                                 ("no speakers", {"segments": [], "words": []})):
-            with self.subTest(case):
-                source = write_json(self.root / "02_speakers.json", transcript)
-                code, _, error = run_cli("--rename", source, "--output", self.output)
-                self.assertEqual((code, "Renaming requires" in error), (1, True))
+    def test_rename_requires_a_speaker_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", {"words": []})
+            code, output = run_cli(
+                "--rename", source, "--output", Path(directory) / "o"
+            )
+        self.assertEqual(
+            (code, output.splitlines()[0]),
+            (1, "Error: Renaming requires a speaker transcript JSON."),
+        )
 
-    def test_review_prints_the_reviewed_draft(self):
-        readable = write_json(self.root / "03_readable.json", readable_transcript(TWO_PARAGRAPHS))
-        _, printed, _ = run_cli("--review", readable, "--output", self.output, paragraphs=TWO_PARAGRAPHS)
-        self.assertIn(readable_text(self.saved("04_review.json")), printed)
+    def test_rename_requires_segments_as_well_as_speakers(self):
+        transcript = {"speakers": {"A": "Speaker A", "B": "Speaker B"}}
+        code, printed, _ = self.renamed(transcript, ["Änne", "Bernd"])
+        self.assertEqual(
+            (code, error_line(printed)),
+            (1, "Error: Renaming requires a speaker transcript JSON."),
+        )
+
+    def test_german_transcript_is_read_where_the_platform_default_is_not_utf8(self):
+        transcript = merge(
+            [Word(0, 0.5, "Grüße", 0.9, "whisper")], [Turn(0, 1, "s")], []
+        )
+        with windows_default_encoding():
+            _, _, saved = self.renamed(transcript, ["", ""])
+        self.assertEqual(saved["words"][0]["text"], "Grüße")
+
+    def test_cancelled_run_keeps_completed_stages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            with patch("builtins.input", side_effect=KeyboardInterrupt):
+                code, output = run_cli("--rename", source, "--output", directory)
+        self.assertEqual(
+            (code, output),
+            (130, "\nProcessing cancelled. Completed stage files remain on disk.\n"),
+        )
+
+    def test_cancellation_is_written_to_standard_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            with patch("builtins.input", side_effect=KeyboardInterrupt):
+                code, stdout, stderr = run_cli_streams(
+                    "--rename", source, "--output", Path(directory) / "o"
+                )
+        self.assertEqual(
+            (code, stdout, stderr),
+            (
+                130,
+                "",
+                "\nProcessing cancelled. Completed stage files remain on disk.\n",
+            ),
+        )
+
+    def test_rename_refuses_a_non_empty_output_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            with patch("builtins.input", side_effect=["Änne", "Bernd"]):
+                code, output = run_cli("--rename", source, "--output", directory)
+        self.assertEqual(
+            (code, error_line(output)),
+            (
+                1,
+                "Error: Output directory is not empty. Choose a new --output directory.",
+            ),
+        )
 
 
-class TranscriptionTests(CommandLineTestCase):
-    def test_missing_audio_file_is_rejected(self):
-        code, _, error = run_cli(self.root / "missing.wav")
-        self.assertEqual((code, "Audio file not found" in error), (1, True))
+class SavedStageTests(unittest.TestCase):
+    def test_enhance_saves_only_the_readable_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            output = Path(directory) / "readable"
+            with served_by(FakeOllama()):
+                code, _ = run_cli("--enhance", source, "--output", output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            (code, saved),
+            (0, ["03_readable.json", "03_readable.md", "03_readable.txt"]),
+        )
 
-    def test_raw_only_prints_the_raw_transcript_and_stops(self):
-        code, printed, _ = run_cli(self.audio, "--raw-only", "--output", self.output)
-        saved = sorted(p.name for p in self.output.iterdir())
-        raw_text = (self.output / "01_raw.txt").read_text(encoding="utf-8")
-        self.assertEqual((code, raw_text in printed, saved), (0, True, ["01_raw.json", "01_raw.txt"]))
+    def test_enhance_prints_the_readable_draft(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            output = Path(directory) / "readable"
+            with served_by(FakeOllama()):
+                _, printed = run_cli("--enhance", source, "--output", output)
+            draft = saved_json(output / "03_readable.json")
+        self.assertIn(readable_text(draft), printed)
 
-    def test_transcription_prints_the_readable_draft(self):
-        _, printed, _ = run_cli(self.audio, "--output", self.output)
-        self.assertIn(readable_text(self.saved("03_readable.json")), printed)
+    def test_enhance_requires_a_speaker_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", {"segments": []})
+            code, _ = run_cli("--enhance", source, "--output", Path(directory) / "o")
+        self.assertEqual(code, 1)
 
-    def test_alignment_option_aligns_the_words(self):
-        run_cli(self.audio, "--align", "--no-llm", "--output", self.output)
-        metadata = self.saved("02_speakers.json")["metadata"]
-        self.assertEqual((metadata["alignment"], metadata["word_timing_counts"]), (True, {"aligned": 2}))
+    def test_enhance_requires_speakers_as_well_as_words(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = {"words": speaker_transcript()["words"]}
+            source = saved_stage(directory, "in.json", transcript)
+            with served_by(FakeOllama()):
+                code, output = run_cli(
+                    "--enhance", source, "--output", Path(directory) / "o"
+                )
+        self.assertEqual(
+            (code, error_line(output)),
+            (1, "Error: Enhancement requires a stage-2 speaker transcript JSON."),
+        )
 
-    def test_transcription_without_alignment_option_records_no_alignment(self):
-        for case, options in (("default", ()), ("--no-align", ("--no-align",))):
-            with self.subTest(case):
-                output = self.root / case
-                code, _, _ = run_cli(self.audio, *options, "--no-llm", "--output", output)
-                metadata = json.loads((output / "02_speakers.json").read_text(encoding="utf-8"))["metadata"]
-                self.assertEqual((code, metadata["alignment"]), (0, False))
+    def test_review_saves_only_the_review_stage(self):
+        with served_by(FakeOllama()):
+            draft = enhance(speaker_transcript(), lambda _: None)
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "03_readable.json", draft)
+            output = Path(directory) / "review"
+            with served_by(FakeOllama()):
+                code, _ = run_cli("--review", source, "--output", output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            (code, saved), (0, ["04_review.json", "04_review.md", "04_review.txt"])
+        )
 
-    def test_offline_transcription_uses_only_cached_models(self):
-        for case, options in (("speakers", ("--no-llm",)), ("raw only", ("--raw-only",))):
-            with self.subTest(case):
-                code, _, error = run_cli(self.audio, "--offline", *options, "--output", self.root / case,
-                                         models=uncached_speech_models())
-                self.assertEqual((code, "not in the local cache" in error), (1, True))
 
-    def test_offline_transcription_never_asks_for_an_hf_token(self):
-        code, _, _ = run_cli_without_credentials(self.audio, "--offline", "--no-llm", "--output", self.output,
-                                                 models=speech_models())
-        self.assertEqual(code, 0)
+class DoctorTests(unittest.TestCase):
+    def doctor(self, service=None, system="Darwin", machine="arm64"):
+        memory = SimpleNamespace(total=16 * 2**30, available=8 * 2**30)
+        with (
+            served_by(service or FakeOllama()),
+            patch("platform.system", return_value=system),
+            patch("platform.machine", return_value=machine),
+            patch("psutil.virtual_memory", return_value=memory),
+            patch("torch.cuda.is_available", return_value=False),
+        ):
+            return run_cli("--doctor")
 
-    def test_unreachable_local_llm_stops_the_run_before_the_speech_models(self):
-        code, _, _ = run_cli(self.audio, "--output", self.output, llm=UnreachableClient)
-        self.assertEqual((code, self.output.exists()), (1, False))
+    def test_doctor_reports_the_local_llm(self):
+        code, output = self.doctor()
+        self.assertEqual((code, output.splitlines()[-1]), (0, f"Local LLM: {IDENTITY}"))
 
-    def test_without_llm_an_unreachable_local_llm_is_not_needed(self):
-        code, _, _ = run_cli(self.audio, "--no-llm", "--output", self.output, llm=UnreachableClient)
-        self.assertEqual(code, 0)
+    def test_unreachable_llm_is_reported_without_failing(self):
+        code, output = self.doctor(FakeOllama(reachable=False))
+        self.assertEqual(
+            (code, output.splitlines()[-1].startswith("Cannot reach local Ollama.")),
+            (0, True),
+        )
 
-    def test_asked_unquoted_path_with_spaces_is_found(self):
-        spaced = self.root / "my interview.wav"
-        spaced.touch()
-        code, _, _ = run_cli("--no-llm", "--output", self.output, answers=(str(spaced), "Anna", "Bernd"))
-        self.assertEqual(code, 0)
+    def test_doctor_reports_total_and_available_ram(self):
+        _, output = self.doctor()
+        self.assertIn("RAM: 16.0 GiB total; 8.0 GiB available\n", output)
 
-    def test_asked_windows_path_keeps_its_backslashes(self):
-        windows_path = self.root / "Interviews\\interview.wav"
-        windows_path.touch()
-        with patch("interview_local.cli.os", WINDOWS_OS):
-            code, _, _ = run_cli("--no-llm", "--output", self.output, answers=(str(windows_path), "Anna", "Bernd"))
-        self.assertEqual(code, 0)
+    def test_unreadable_ram_is_reported(self):
+        with (
+            served_by(FakeOllama()),
+            patch("psutil.virtual_memory", side_effect=OSError),
+        ):
+            _, output = run_cli("--doctor")
+        self.assertIn("Could not read RAM information automatically.\n", output)
 
-    def test_asked_quoted_windows_path_keeps_its_drive_letter(self):
-        relative_drive_path = "X:\\Interviews\\interview.wav"
-        (self.root / relative_drive_path).touch()
-        with patch("interview_local.cli.os", WINDOWS_OS), chdir(self.root):
-            code, _, _ = run_cli("--no-llm", "--output", self.output,
-                                 answers=(f'"{relative_drive_path}"', "Anna", "Bernd"))
-        self.assertEqual(code, 0)
+    def test_apple_silicon_notes_shared_memory(self):
+        _, output = self.doctor(system="Darwin", machine="arm64")
+        self.assertIn("there is no additional dedicated VRAM", output)
 
-    def test_asked_windows_path_may_be_quoted(self):
-        spaced = self.root / "my interview.wav"
-        spaced.touch()
-        with patch("interview_local.cli.os", WINDOWS_OS):
-            code, _, _ = run_cli("--no-llm", "--output", self.output, answers=(f'"{spaced}"', "Anna", "Bernd"))
-        self.assertEqual(code, 0)
+    def test_other_systems_get_no_shared_memory_note(self):
+        _, output = self.doctor(system="Linux", machine="x86_64")
+        self.assertNotIn("there is no additional dedicated VRAM", output)
 
-    def test_without_llm_the_named_speaker_transcript_is_printed(self):
-        code, printed, _ = run_cli(self.audio, "--no-llm", "--name-a", "Anna", "--output", self.output)
-        drafted = (self.output / "03_readable.json").exists()
-        self.assertEqual((code, "] Anna\nGuten Tag" in printed, drafted), (0, True, False))
+    def test_intel_mac_gets_no_shared_memory_note(self):
+        _, output = self.doctor(system="Darwin", machine="x86_64")
+        self.assertNotIn("there is no additional dedicated VRAM", output)
 
-    def test_given_audio_is_transcribed_without_asking_for_names(self):
-        run_cli(self.audio, "--no-llm", "--output", self.output)
-        self.assertEqual(self.saved("02_speakers.json")["speakers"], {"A": "Speaker A", "B": "Speaker B"})
+    def test_memory_of_the_first_cuda_gpu_is_reported(self):
+        first_gpu = SimpleNamespace(total_memory=8 * 2**30)
+        with (
+            served_by(FakeOllama()),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_properties", {0: first_gpu}.__getitem__),
+        ):
+            _, output = run_cli("--doctor")
+        self.assertIn("Dedicated GPU memory: 8.0 GiB\n", output)
 
-    def test_transcription_drafts_a_readable_transcript(self):
-        code, printed, _ = run_cli(self.audio, "--output", self.output)
-        self.assertEqual((code, self.saved("03_readable.json")["stage"], "run --review on 03_readable.json" in printed),
-                         (0, "readable", True))
 
-    def test_asked_audio_path_may_be_quoted_and_names_are_asked(self):
-        spaced = self.root / "my interview.wav"
-        spaced.touch()
-        answers = (f"'{spaced}'", "Anna", "Bernd")
-        code, _, _ = run_cli("--no-llm", "--output", self.output, answers=answers)
-        self.assertEqual((code, self.saved("02_speakers.json")["speakers"]), (0, {"A": "Anna", "B": "Bernd"}))
+class GuiFlagTests(unittest.TestCase):
+    def test_gui_flag_opens_the_window(self):
+        opened = []
+        window = types.ModuleType("interview_local.gui")
+        window.launch = lambda: opened.append(True)
+        with patch.dict(sys.modules, {"interview_local.gui": window}):
+            code, _ = run_cli("--gui")
+        self.assertEqual((code, opened), (0, [True]))
+
+    def test_missing_tk_falls_back_to_the_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = saved_stage(directory, "in.json", speaker_transcript())
+            output = Path(directory) / "renamed"
+            with (
+                patch.dict(sys.modules, {"interview_local.gui": None}),
+                patch("builtins.input", side_effect=["Änne", "Bernd"]),
+            ):
+                code, printed = run_cli("--gui", "--rename", source, "--output", output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            (code, printed.splitlines()[0], saved),
+            (
+                0,
+                "Tk is not installed. Falling back to the terminal dialog.",
+                SPEAKER_FILES,
+            ),
+        )
+
+
+class PrepareTests(unittest.TestCase):
+    def test_speech_preparation_loads_every_speech_model(self):
+        worker = FakeWorker({})
+        with bundled_local_model(), patch("interview_local.pipeline.worker", worker):
+            code, output = run_cli("--prepare", "--align")
+        self.assertEqual(
+            (code, worker.stages, output.splitlines()[-1]),
+            (
+                0,
+                ["prepare-diarize", "prepare-asr", "prepare-align"],
+                "Preparation complete.",
+            ),
+        )
+
+    def test_speech_preparation_hands_the_environment_token_to_every_worker(self):
+        worker = FakeWorker({})
+        with (
+            without_local_model(),
+            patch.dict(os.environ, {"HF_TOKEN": TOKEN}),
+            patch("interview_local.pipeline.worker", worker),
+        ):
+            run_cli("--prepare")
+        self.assertEqual(worker.tokens, {TOKEN})
+
+    def test_llm_preparation_downloads_only_the_language_model(self):
+        service = FakeOllama(installed=())
+        worker = FakeWorker({})
+        with served_by(service), patch("interview_local.pipeline.worker", worker):
+            code, _ = run_cli("--prepare-llm")
+        self.assertEqual(
+            (code, MODEL in service.installed, worker.stages), (0, True, [])
+        )
+
+
+class TokenTests(unittest.TestCase):
+    def worker_tokens(self, environment, cached=None, entered=""):
+        """Tokens the speech workers receive, and the printed output."""
+        worker = FakeWorker(OUTPUTS)
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "interview.wav"
+            audio.touch()
+            with (
+                patch.dict(os.environ, environment),
+                patch("interview_local.pipeline.worker", worker),
+                patch("huggingface_hub.get_token", return_value=cached),
+                patch("getpass.getpass", return_value=entered),
+            ):
+                _, output = run_cli(
+                    audio, "--no-llm", "--output", Path(directory) / "run"
+                )
+        return worker.tokens, output
+
+    def test_local_model_needs_no_token(self):
+        with bundled_local_model():
+            tokens, _ = self.worker_tokens({"HF_TOKEN": TOKEN})
+        self.assertEqual(tokens, {None})
+
+    def test_environment_token_is_used_for_the_hub(self):
+        with without_local_model():
+            tokens, _ = self.worker_tokens({"HF_TOKEN": TOKEN})
+        self.assertEqual(tokens, {TOKEN})
+
+    def test_cached_login_is_used_without_an_environment_token(self):
+        with without_local_model():
+            tokens, _ = self.worker_tokens({"HF_TOKEN": ""}, cached="hf_cached")
+        self.assertEqual(tokens, {"hf_cached"})
+
+    def test_entered_token_is_used_without_any_saved_token(self):
+        with without_local_model():
+            tokens, output = self.worker_tokens({"HF_TOKEN": ""}, entered=" hf_typed ")
+        self.assertEqual(
+            (tokens, "speaker-diarization-community-1 conditions" in output),
+            ({"hf_typed"}, True),
+        )
+
+    def test_skipped_token_entry_runs_without_a_token(self):
+        with without_local_model():
+            tokens, _ = self.worker_tokens({"HF_TOKEN": ""}, entered="")
+        self.assertEqual(tokens, {None})
+
+    def test_offline_run_asks_for_no_token(self):
+        worker = FakeWorker(OUTPUTS)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            without_local_model(),
+            patch.dict(os.environ, {"HF_TOKEN": TOKEN}),
+            patch("interview_local.pipeline.worker", worker),
+        ):
+            audio = Path(directory) / "interview.wav"
+            audio.touch()
+            run_cli(audio, "--offline", "--no-llm", "--output", Path(directory) / "o")
+        self.assertEqual(worker.tokens, {None})
+
+
+class InteractiveAudioTests(unittest.TestCase):
+    def run_interactive(self, file_name, entered_path, *names):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / file_name
+            audio.touch()
+            output = Path(directory) / "run"
+            entries = [entered_path(audio), *names]
+            with (
+                patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)),
+                patch("builtins.input", side_effect=entries),
+            ):
+                code, printed = run_cli("--offline", "--no-llm", "--output", output)
+            saved_file = output / "02_speakers.json"
+            speakers = (
+                saved_json(saved_file)["speakers"] if saved_file.exists() else None
+            )
+        return code, speakers, printed
+
+    def test_quoted_dragged_path_is_processed_and_names_are_asked(self):
+        code, speakers, _ = self.run_interactive(
+            "interview.wav", lambda audio: f"'{audio}' ", "Änne", ""
+        )
+        self.assertEqual((code, speakers), (0, {"A": "Änne", "B": "Speaker B"}))
+
+    def test_unquoted_path_with_spaces_is_taken_literally(self):
+        code, speakers, _ = self.run_interactive("my interview.wav", str, "", "")
+        self.assertEqual((code, speakers), (0, {"A": "Speaker A", "B": "Speaker B"}))
+
+    def windows_entry(self, entered_path):
+        """The error a Windows terminal reports for a file named take\\X."""
+        windows = SimpleNamespace(name="nt", environ=os.environ)
+        with patch.object(cli, "os", windows):
+            _, _, printed = self.run_interactive("take\\X", entered_path, "", "")
+        return error_line(printed)
+
+    def test_windows_path_is_used_exactly_as_entered_inside_its_quotes(self):
+        self.assertEqual(
+            self.windows_entry(lambda audio: f'"{audio}"'),
+            "Error: Please select a WAV, MP3 or M4A file.",
+        )
+
+    def test_windows_path_keeps_its_backslashes(self):
+        self.assertEqual(
+            self.windows_entry(str), "Error: Please select a WAV, MP3 or M4A file."
+        )
+
+
+class AudioTests(unittest.TestCase):
+    def run_audio(self, *options, outputs=OUTPUTS):
+        """Exit code, saved files, printed output and the fake speech workers."""
+        worker = FakeWorker(outputs)
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "interview.wav"
+            audio.touch()
+            output = Path(directory) / "run"
+            with patch("interview_local.pipeline.worker", worker):
+                code, printed = run_cli(
+                    audio, "--offline", "--output", output, *options
+                )
+            saved = sorted(os.listdir(output)) if output.exists() else []
+            speakers_file = output / "02_speakers.json"
+            speakers = saved_json(speakers_file) if speakers_file.exists() else None
+        return SimpleNamespace(
+            code=code, saved=saved, printed=printed, worker=worker, speakers=speakers
+        )
+
+    def test_missing_audio_file_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "interview.wav"
+            code, output = run_cli(
+                missing, "--offline", "--no-llm", "--output", Path(directory) / "o"
+            )
+        self.assertEqual(
+            (code, output.splitlines()[0]),
+            (1, "Error: Audio file not found. Enter its full path."),
+        )
+
+    def test_names_from_the_command_line_are_saved_without_asking(self):
+        run = self.run_audio("--no-llm", "--name-a", "Änne", "--name-b", "Bernd")
+        self.assertEqual(run.speakers["speakers"], {"A": "Änne", "B": "Bernd"})
+
+    def test_unreachable_llm_stops_before_speech_processing(self):
+        worker = FakeWorker(OUTPUTS)
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "interview.wav"
+            audio.touch()
+            with (
+                served_by(FakeOllama(reachable=False)),
+                patch("interview_local.pipeline.worker", worker),
+            ):
+                code, _ = run_cli(audio, "--offline", "--output", Path(directory) / "o")
+        self.assertEqual((code, worker.stages), (1, []))
+
+    def test_full_run_points_to_the_separate_review(self):
+        with served_by(FakeOllama()):
+            run = self.run_audio()
+        self.assertIn(
+            "For the separate comparison pass, run --review on 03_readable.json.",
+            run.printed,
+        )
+
+    def test_full_run_reports_the_editor_progress(self):
+        with served_by(FakeOllama()):
+            run = self.run_audio(outputs=SPOKEN_OUTPUTS)
+        self.assertIn("LLM readability: words 1–1 / 1\n", run.printed)
+
+    def test_run_without_llm_prints_the_speaker_transcript(self):
+        self.assertIn("No speech detected.\n", self.run_audio("--no-llm").printed)
+
+    def test_offline_run_starts_every_worker_offline(self):
+        self.assertEqual(self.run_audio("--no-llm").worker.offline, {True})
+
+    def test_alignment_flag_aligns_the_words(self):
+        self.assertIn("align", self.run_audio("--no-llm", "--align").worker.stages)
+
+    def test_no_align_flag_runs_without_alignment(self):
+        run = self.run_audio("--no-llm", "--no-align")
+        self.assertEqual((run.code, "align" in run.worker.stages), (0, False))
+
+    def test_run_records_that_alignment_was_not_used(self):
+        metadata = self.run_audio("--no-llm").speakers["metadata"]
+        self.assertIs(metadata["alignment"], False)
+
+    def test_raw_only_saves_only_the_raw_stage(self):
+        run = self.run_audio("--raw-only")
+        self.assertEqual((run.code, run.saved), (0, ["01_raw.json", "01_raw.txt"]))
+
+    def test_raw_only_prints_the_raw_transcript(self):
+        run = self.run_audio("--raw-only", outputs=SPOKEN_OUTPUTS)
+        self.assertIn("[00:00:00.000 – 00:00:01.000]\nGrüße\n", run.printed)
+
+    def test_raw_only_runs_offline_when_asked(self):
+        self.assertEqual(self.run_audio("--raw-only").worker.offline, {True})
+
+    def test_raw_transcript_is_printed_on_a_case_sensitive_file_system(self):
+        with case_sensitive_file_names():
+            run = self.run_audio("--raw-only", outputs=SPOKEN_OUTPUTS)
+        self.assertIn("\nGrüße\n", run.printed)
+
+    def test_german_raw_transcript_is_printed_where_the_default_is_not_utf8(self):
+        with windows_default_encoding():
+            run = self.run_audio("--raw-only", outputs=SPOKEN_OUTPUTS)
+        self.assertIn("\nGrüße\n", run.printed)
+
+    def test_run_without_llm_saves_raw_and_speaker_stages(self):
+        run = self.run_audio("--no-llm")
+        self.assertEqual(
+            (run.code, run.saved), (0, ["01_raw.json", "01_raw.txt", *SPEAKER_FILES])
+        )
+
+    def test_full_run_adds_the_readable_stage(self):
+        with served_by(FakeOllama()):
+            run = self.run_audio()
+        self.assertEqual(
+            (run.code, run.saved),
+            (
+                0,
+                [
+                    "01_raw.json",
+                    "01_raw.txt",
+                    *SPEAKER_FILES[:2],
+                    "03_readable.json",
+                    "03_readable.md",
+                    "03_readable.txt",
+                    *SPEAKER_FILES[2:],
+                ],
+            ),
+        )
+
+
+class OutputDirectoryTests(unittest.TestCase):
+    def run_into(self, directory, output):
+        audio = Path(directory) / "interview.wav"
+        audio.touch()
+        with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+            return run_cli(audio, "--offline", "--no-llm", "--output", output)
+
+    def test_default_output_is_a_new_timestamped_folder_under_transcripts(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory):
+            audio = Path(directory) / "interview.wav"
+            audio.touch()
+            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+                run_cli(audio, "--offline", "--no-llm")
+            runs = os.listdir(Path(directory) / "transcripts")
+            created = sorted(os.listdir(directory))
+        self.assertEqual(
+            (created, len(runs), re.fullmatch(TIMESTAMPED_FOLDER, runs[0]) is not None),
+            (["interview.wav", "transcripts"], 1, True),
+        )
+
+    def test_existing_empty_output_directory_is_used(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            output.mkdir()
+            code, _ = self.run_into(directory, output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            (code, saved), (0, ["01_raw.json", "01_raw.txt", *SPEAKER_FILES])
+        )
+
+    def test_missing_parents_of_the_output_directory_are_created(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "interviews" / "first"
+            code, _ = self.run_into(directory, output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            (code, saved), (0, ["01_raw.json", "01_raw.txt", *SPEAKER_FILES])
+        )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,14 @@
 """Loopback-only HTTP server for uploading recordings and correcting transcripts."""
+
 from __future__ import annotations
+
+import json
+import re
+import shutil
+import threading
+import traceback
+import urllib.parse
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,18 +16,18 @@ from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
-import json
 from pathlib import Path
-import re
-import shutil
-import threading
-import traceback
-import urllib.parse
-import webbrowser
 
 from ..artifacts import corrected_text
-from ..corrections import (CorrectedParagraph, edit_paragraph_text, load_corrected_paragraphs, load_speaker_names,
-                           readable_source_words, reassign_words, save_corrections)
+from ..corrections import (
+    CorrectedParagraph,
+    edit_paragraph_text,
+    load_corrected_paragraphs,
+    load_speaker_names,
+    readable_source_words,
+    reassign_words,
+    save_corrections,
+)
 from ..editor_document import build_editor_document
 from .jobs import TranscriptionJob
 
@@ -29,10 +38,15 @@ UNSUPPORTED_FORMAT_MESSAGE = "Please select a WAV, MP3 or M4A file."
 STORED_AUDIO_STEM = "source"
 READABLE_FILENAME = "03_readable.json"
 AUDIO_FILENAME_HEADER = "X-Audio-Filename"
-STATIC_CONTENT_TYPES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
-                        "style.css": "text/css; charset=utf-8"}
-EXPORT_FORMATS = {"export.md": ("md", True, "text/markdown; charset=utf-8"),
-                  "export.txt": ("txt", False, "text/plain; charset=utf-8")}
+STATIC_CONTENT_TYPES = {
+    "index.html": "text/html; charset=utf-8",
+    "app.js": "text/javascript; charset=utf-8",
+    "style.css": "text/css; charset=utf-8",
+}
+EXPORT_FORMATS = {
+    "export.md": ("md", True, "text/markdown; charset=utf-8"),
+    "export.txt": ("txt", False, "text/plain; charset=utf-8"),
+}
 
 
 class HttpError(Exception):
@@ -43,7 +57,9 @@ class HttpError(Exception):
 
 class RangeNotSatisfiable(HttpError, ValueError):
     def __init__(self, message: str):
-        super().__init__(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, message)  # pragma: no mutate - message is wording; the 416 status is asserted
+        super().__init__(
+            HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, message
+        )  # pragma: no mutate - message is wording; the 416 status is asserted
 
 
 def serve(runs_root: Path) -> None:
@@ -51,7 +67,10 @@ def serve(runs_root: Path) -> None:
     runs_root.mkdir(parents=True, exist_ok=True)
     server = EditorServer(runs_root)
     url = f"http://{LOOPBACK_HOST}:{server.server_address[1]}/"
-    print(f"Interview Local web UI: {url}\nRuns are saved in {runs_root}. Press Ctrl+C to stop.", flush=True)
+    print(
+        f"Interview Local web UI: {url}\nRuns are saved in {runs_root}. Press Ctrl+C to stop.",
+        flush=True,
+    )
     webbrowser.open(url)
     try:
         server.serve_forever()
@@ -90,12 +109,18 @@ def parse_byte_range(header: str, size: int) -> tuple[int, int]:
         ValueError: If the header is malformed or requests several ranges.
     """
     match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
-    if not match or match.groups() == ("", ""):  # pragma: no mutate - "bytes=-" fails int("") with ValueError too; only the message differs
+    if (
+        not match or match.groups() == ("", "")
+    ):  # pragma: no mutate - "bytes=-" fails int("") with ValueError too; only the message differs
         raise ValueError(f"Unsupported Range header: {header}")
     first, last = match.groups()
     if not first:
-        return _suffix_range(header, int(last), size)  # pragma: no mutate - header only feeds the error message
-    return _range_from(header, int(first), last, size)  # pragma: no mutate - header only feeds the error message
+        return _suffix_range(
+            header, int(last), size
+        )  # pragma: no mutate - header only feeds the error message
+    return _range_from(
+        header, int(first), last, size
+    )  # pragma: no mutate - header only feeds the error message
 
 
 def _suffix_range(header: str, suffix_length: int, size: int) -> tuple[int, int]:
@@ -138,9 +163,12 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": str(exc)})
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"{type(exc).__name__}: {exc}"},
+            )
 
     def _handle(self, method: str) -> None:
         self._require_loopback_host()
@@ -150,22 +178,37 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
 
     def _require_loopback_host(self) -> None:
         port = self.server.server_address[1]
-        if self.headers.get("Host") not in {f"{LOOPBACK_HOST}:{port}", f"localhost:{port}"}:
-            raise HttpError(HTTPStatus.FORBIDDEN, "Requests must address this machine's loopback interface.")
+        if self.headers.get("Host") not in {
+            f"{LOOPBACK_HOST}:{port}",
+            f"localhost:{port}",
+        }:
+            raise HttpError(
+                HTTPStatus.FORBIDDEN,
+                "Requests must address this machine's loopback interface.",
+            )
 
     def _require_preflighted_write(self) -> None:
         content_type = self.headers.get("Content-Type", "")
-        if not content_type.startswith("application/json") and AUDIO_FILENAME_HEADER not in self.headers:
-            raise HttpError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
-                            f"Write requests need Content-Type: application/json or {AUDIO_FILENAME_HEADER}.")
+        if (
+            not content_type.startswith("application/json")
+            and AUDIO_FILENAME_HEADER not in self.headers
+        ):
+            raise HttpError(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                f"Write requests need Content-Type: application/json or {AUDIO_FILENAME_HEADER}.",
+            )
 
     def _path_segments(self) -> list[str]:
         path = urllib.parse.urlsplit(self.path).path
         return [urllib.parse.unquote(segment) for segment in path.split("/") if segment]
 
     def _query(self) -> dict[str, str]:
-        return {key: values[-1] for key, values in
-                urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
+        return {
+            key: values[-1]
+            for key, values in urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query
+            ).items()
+        }
 
     def _route(self, method: str, segments: list[str]) -> None:
         for route in ROUTES:
@@ -192,12 +235,19 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         self._send_bytes(HTTPStatus.OK, static_file(name), STATIC_CONTENT_TYPES[name])
 
     def _start_upload(self) -> None:
-        if not self.state.upload_lock.acquire(blocking=False):  # pragma: no mutate - blocking=None is falsy like False; blocking=True deadlocks (timeout) in test_upload_while_another_upload_is_received_is_rejected
+        if not self.state.upload_lock.acquire(
+            blocking=False
+        ):  # pragma: no mutate - blocking=None is falsy like False; blocking=True deadlocks (timeout) in test_upload_while_another_upload_is_received_is_rejected
             raise HttpError(HTTPStatus.CONFLICT, "Another upload is in progress.")
         try:
             if self.state.job_running():
-                raise HttpError(HTTPStatus.CONFLICT, "A transcription is already running. Wait until it finishes.")
-            extension = audio_extension(urllib.parse.unquote(self.headers.get(AUDIO_FILENAME_HEADER, "")))  # pragma: no mutate - any default without an audio extension is rejected alike; None is killed by test_upload_without_a_filename_is_rejected
+                raise HttpError(
+                    HTTPStatus.CONFLICT,
+                    "A transcription is already running. Wait until it finishes.",
+                )
+            extension = audio_extension(
+                urllib.parse.unquote(self.headers.get(AUDIO_FILENAME_HEADER, ""))
+            )  # pragma: no mutate - any default without an audio extension is rejected alike; None is killed by test_upload_without_a_filename_is_rejected
             names = self._requested_speaker_names()
             length = self._content_length()
             run_dir = create_run_dir(self.state.runs_root)
@@ -212,11 +262,16 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
             job.start()
         finally:
             self.state.upload_lock.release()
-        self._send_json(HTTPStatus.ACCEPTED, {"job_id": job.job_id, "run_id": run_dir.name})
+        self._send_json(
+            HTTPStatus.ACCEPTED, {"job_id": job.job_id, "run_id": run_dir.name}
+        )
 
     def _requested_speaker_names(self) -> dict[str, str]:
         query = self._query()
-        names = {"A": query.get("name_a", "").strip(), "B": query.get("name_b", "").strip()}
+        names = {
+            "A": query.get("name_a", "").strip(),
+            "B": query.get("name_b", "").strip(),
+        }
         if not all(names.values()):
             raise ValueError("Enter a name for both speakers.")
         return names
@@ -224,7 +279,9 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
     def _content_length(self) -> int:
         header = self.headers.get("Content-Length")
         if header is None:
-            raise HttpError(HTTPStatus.LENGTH_REQUIRED, "The upload needs a Content-Length header.")
+            raise HttpError(
+                HTTPStatus.LENGTH_REQUIRED, "The upload needs a Content-Length header."
+            )
         length = int(header)
         if length <= 0:
             raise ValueError("The uploaded file is empty.")
@@ -236,7 +293,9 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
             while remaining:
                 chunk = self.rfile.read(min(UPLOAD_CHUNK_BYTES, remaining))
                 if not chunk:
-                    raise ValueError("The upload ended before the whole file was received.")
+                    raise ValueError(
+                        "The upload ended before the whole file was received."
+                    )
                 output.write(chunk)
                 remaining -= len(chunk)
 
@@ -245,8 +304,16 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         if job is None:
             raise HttpError(HTTPStatus.NOT_FOUND, f"Unknown job {job_id}.")
         status = job.status()
-        self._send_json(HTTPStatus.OK, dict(state=status.state, phase=status.phase, detail=status.detail,
-                                            error=status.error, run_id=status.run_id))
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "state": status.state,
+                "phase": status.phase,
+                "detail": status.detail,
+                "error": status.error,
+                "run_id": status.run_id,
+            },
+        )
 
     def _run_dir(self, run_id: str) -> Path:
         return resolve_run_dir(self.state.runs_root, run_id)
@@ -255,46 +322,82 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         run_dir = self._run_dir(run_id)
         stored_audio(run_dir)
         readable = load_readable(run_dir)
-        document = build_editor_document(readable, load_corrected_paragraphs(run_dir, readable),
-                                         load_speaker_names(run_dir, readable))
+        document = build_editor_document(
+            readable,
+            load_corrected_paragraphs(run_dir, readable),
+            load_speaker_names(run_dir, readable),
+        )
         document["run_id"] = run_id
         return document
 
     def _edit_text(self, run_id: str, first_word: str) -> None:
         text = self._json_body().get("text")
         if not isinstance(text, str):
-            raise ValueError("The request needs a text string.")
-        self._update_corrections(run_id, lambda readable, paragraphs, speakers: (
-            edit_paragraph_text(paragraphs, int(first_word), text), speakers))
+            raise HttpError(HTTPStatus.BAD_REQUEST, "The request needs a text string.")
+        self._update_corrections(
+            run_id,
+            lambda readable, paragraphs, speakers: (
+                edit_paragraph_text(paragraphs, int(first_word), text),
+                speakers,
+            ),
+        )
 
     def _reassign(self, run_id: str) -> None:
         body = self._json_body()
-        first_word, last_word, speaker = body.get("first_word"), body.get("last_word"), body.get("speaker")
-        if type(first_word) is not int or type(last_word) is not int or not isinstance(speaker, str):  # pragma: no mutate - a non-text speaker is rejected with 400 by reassign_words as an unknown speaker; only the message differs
-            raise ValueError("The request needs integer first_word/last_word and a speaker label.")
-        self._update_corrections(run_id, lambda readable, paragraphs, speakers: (
-            reassign_words(paragraphs, readable_source_words(readable), set(readable["speakers"]),
-                           first_word, last_word, speaker), speakers))
+        first_word, last_word, speaker = (
+            body.get("first_word"),
+            body.get("last_word"),
+            body.get("speaker"),
+        )
+        if (
+            type(first_word) is not int
+            or type(last_word) is not int
+            or not isinstance(speaker, str)
+        ):  # pragma: no mutate - a non-text speaker is rejected with 400 by reassign_words as an unknown speaker; only the message differs
+            raise ValueError(
+                "The request needs integer first_word/last_word and a speaker label."
+            )
+        self._update_corrections(
+            run_id,
+            lambda readable, paragraphs, speakers: (
+                reassign_words(
+                    paragraphs,
+                    readable_source_words(readable),
+                    set(readable["speakers"]),
+                    first_word,
+                    last_word,
+                    speaker,
+                ),
+                speakers,
+            ),
+        )
 
     def _rename_speakers(self, run_id: str) -> None:
         names = self._json_body()
         if not all(isinstance(name, str) for name in names.values()):
             raise ValueError("Speaker names must be text.")
-        self._update_corrections(run_id, lambda readable, paragraphs, speakers: (paragraphs, names))
+        self._update_corrections(
+            run_id, lambda readable, paragraphs, speakers: (paragraphs, names)
+        )
 
     def _update_corrections(self, run_id: str, change: CorrectionChange) -> None:
         run_dir = self._run_dir(run_id)
         with self.state.corrections_lock:
             readable = load_readable(run_dir)
-            paragraphs, speakers = change(readable, load_corrected_paragraphs(run_dir, readable),
-                                          load_speaker_names(run_dir, readable))
+            paragraphs, speakers = change(
+                readable,
+                load_corrected_paragraphs(run_dir, readable),
+                load_speaker_names(run_dir, readable),
+            )
             save_corrections(run_dir, readable, speakers, paragraphs)
         self._send_json(HTTPStatus.OK, self._document(run_id))
 
     def _json_body(self) -> dict:
         body = json.loads(self.rfile.read(self._content_length()).decode("utf-8"))
         if not isinstance(body, dict):
-            raise ValueError("The request body must be a JSON object.")
+            raise HttpError(
+                HTTPStatus.BAD_REQUEST, "The request body must be a JSON object."
+            )
         return body
 
     def _send_audio(self, audio: Path) -> None:
@@ -325,7 +428,9 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         suffix, markdown, content_type = EXPORT_FORMATS[export]
         text = corrected_text(self._document(run_id)["paragraphs"], markdown=markdown)
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Disposition", f'attachment; filename="{run_id}_corrected.{suffix}"')
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{run_id}_corrected.{suffix}"'
+        )
         body = text.encode("utf-8")
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -333,8 +438,11 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_json(self, status: HTTPStatus, value: dict) -> None:
-        self._send_bytes(status, json.dumps(value, ensure_ascii=False).encode("utf-8"),
-                         "application/json; charset=utf-8")
+        self._send_bytes(
+            status,
+            json.dumps(value, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
 
     def _send_bytes(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
         self.send_response(status)
@@ -345,13 +453,16 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-CorrectionChange = Callable[[dict, list[CorrectedParagraph], dict[str, str]],
-                            tuple[list[CorrectedParagraph], dict[str, str]]]
+CorrectionChange = Callable[
+    [dict, list[CorrectedParagraph], dict[str, str]],
+    tuple[list[CorrectedParagraph], dict[str, str]],
+]
 
 
 @dataclass(frozen=True)
 class Route:
     """A request method and path pattern; PARAMETER segments are passed to the action in order."""
+
     method: str
     pattern: tuple[str | object, ...]
     action: Callable[..., None]
@@ -360,13 +471,19 @@ class Route:
         return method == self.method and _segments_match(self.pattern, segments)
 
     def handle(self, handler: EditorRequestHandler, segments: list[str]) -> None:
-        parameters = [segment for expected, segment in zip(self.pattern, segments) if expected is PARAMETER]
+        parameters = [
+            segment
+            for expected, segment in zip(self.pattern, segments)
+            if expected is PARAMETER
+        ]
         self.action(handler, *parameters)
 
 
 def _segments_match(pattern: tuple[str | object, ...], segments: list[str]) -> bool:
     return len(pattern) == len(segments) and all(
-        expected is PARAMETER or expected == segment for expected, segment in zip(pattern, segments))
+        expected is PARAMETER or expected == segment
+        for expected, segment in zip(pattern, segments)
+    )
 
 
 PARAMETER = object()
@@ -376,13 +493,35 @@ ROUTES = (
     Route("GET", ("api", "runs"), EditorRequestHandler._send_runs),
     Route("POST", ("api", "runs"), EditorRequestHandler._start_upload),
     Route("GET", ("api", "jobs", PARAMETER), EditorRequestHandler._send_job),
-    Route("GET", ("api", "runs", PARAMETER, "document"), EditorRequestHandler._send_document),
-    Route("GET", ("api", "runs", PARAMETER, "audio"), EditorRequestHandler._send_run_audio),
-    *(Route("GET", ("api", "runs", PARAMETER, export), partial(EditorRequestHandler._send_export, export=export))
-      for export in EXPORT_FORMATS),
-    Route("PUT", ("api", "runs", PARAMETER, "paragraphs", PARAMETER, "text"), EditorRequestHandler._edit_text),
-    Route("POST", ("api", "runs", PARAMETER, "reassign"), EditorRequestHandler._reassign),
-    Route("PUT", ("api", "runs", PARAMETER, "speakers"), EditorRequestHandler._rename_speakers),
+    Route(
+        "GET",
+        ("api", "runs", PARAMETER, "document"),
+        EditorRequestHandler._send_document,
+    ),
+    Route(
+        "GET", ("api", "runs", PARAMETER, "audio"), EditorRequestHandler._send_run_audio
+    ),
+    *(
+        Route(
+            "GET",
+            ("api", "runs", PARAMETER, export),
+            partial(EditorRequestHandler._send_export, export=export),
+        )
+        for export in EXPORT_FORMATS
+    ),
+    Route(
+        "PUT",
+        ("api", "runs", PARAMETER, "paragraphs", PARAMETER, "text"),
+        EditorRequestHandler._edit_text,
+    ),
+    Route(
+        "POST", ("api", "runs", PARAMETER, "reassign"), EditorRequestHandler._reassign
+    ),
+    Route(
+        "PUT",
+        ("api", "runs", PARAMETER, "speakers"),
+        EditorRequestHandler._rename_speakers,
+    ),
 )
 
 
@@ -429,11 +568,16 @@ def stored_audio(run_dir: Path) -> Path:
     Raises:
         HttpError: If the run directory holds no stored audio copy.
     """
-    candidates = [run_dir / f"{STORED_AUDIO_STEM}{extension}" for extension in AUDIO_CONTENT_TYPES]
+    candidates = [
+        run_dir / f"{STORED_AUDIO_STEM}{extension}" for extension in AUDIO_CONTENT_TYPES
+    ]
     existing = list(filter(Path.is_file, candidates))
     if len(existing) != 1:
-        raise HttpError(HTTPStatus.CONFLICT, "This run has no stored audio copy and cannot be opened in the "
-                        "editor. Only runs started from the web UI can be edited.")
+        raise HttpError(
+            HTTPStatus.CONFLICT,
+            "This run has no stored audio copy and cannot be opened in the "
+            "editor. Only runs started from the web UI can be edited.",
+        )
     return existing[0]
 
 
@@ -445,13 +589,19 @@ def load_readable(run_dir: Path) -> dict:
     """
     path = run_dir / READABLE_FILENAME
     if not path.is_file():
-        raise HttpError(HTTPStatus.NOT_FOUND, "This run has no readable transcript yet.")
+        raise HttpError(
+            HTTPStatus.NOT_FOUND, "This run has no readable transcript yet."
+        )
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def list_runs(runs_root: Path) -> list[dict]:
     """List runs with a readable transcript, newest first."""
-    runs = sorted(filter(_has_readable_transcript, runs_root.iterdir()), key=lambda path: path.name, reverse=True)  # pragma: no mutate - sibling paths order like their names; reverse is killed by test_runs_are_listed_newest_first
+    runs = sorted(
+        filter(_has_readable_transcript, runs_root.iterdir()),
+        key=lambda path: path.name,
+        reverse=True,
+    )  # pragma: no mutate - sibling paths order like their names; reverse is killed by test_runs_are_listed_newest_first
     return [{"run_id": path.name} for path in runs]
 
 

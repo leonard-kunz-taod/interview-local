@@ -1,7 +1,9 @@
 """Map a paragraph's display text back to the source (ASR) words it came from."""
+
 from __future__ import annotations
-from dataclasses import dataclass
+
 import difflib
+from dataclasses import dataclass
 from itertools import pairwise
 from typing import Literal
 
@@ -22,6 +24,7 @@ class DisplayWord:
         original_text: The covered source words joined by spaces; empty when inserted.
         removed_before: Source words dropped from the text at this position.
     """
+
     text: str
     source_word_ids: tuple[int, ...]
     change: Change
@@ -43,9 +46,13 @@ def align_text_to_source(text: str, source_words: list[dict]) -> list[DisplayWor
         raise ValueError("Cannot align text to an empty source.")
     display_texts = _display_texts(text)
     alignment = _TokenAlignment(len(display_texts))
-    for opcode in _token_opcodes(_display_tokens(display_texts), _source_tokens(source_words)):
+    for opcode in _token_opcodes(
+        _display_tokens(display_texts), _source_tokens(source_words)
+    ):
         alignment.apply(opcode)
-    return alignment.display_words(display_texts, {word["word_id"]: word["text"] for word in source_words})
+    return alignment.display_words(
+        display_texts, {word["word_id"]: word["text"] for word in source_words}
+    )
 
 
 def _display_texts(text: str) -> list[str]:
@@ -67,12 +74,20 @@ def _positions_with_words(pieces: list[str]) -> list[int]:
 
 def _display_tokens(display_texts: list[str]) -> list[tuple[str, int]]:
     """Word tokens of the display text, each with the index of its display word."""
-    return [(token, index) for index, word in enumerate(display_texts) for token in tokens(word)]
+    return [
+        (token, index)
+        for index, word in enumerate(display_texts)
+        for token in tokens(word)
+    ]
 
 
 def _source_tokens(source_words: list[dict]) -> list[tuple[str, int]]:
     """Word tokens of the source, each with the id of its source word."""
-    return [(token, word["word_id"]) for word in source_words for token in tokens(word["text"])]
+    return [
+        (token, word["word_id"])
+        for word in source_words
+        for token in tokens(word["text"])
+    ]
 
 
 @dataclass(frozen=True)
@@ -82,26 +97,37 @@ class _Opcode:
     ``next_display_index`` is the display word at the opcode's text position, or the last
     display word when the opcode lies behind the end of the text.
     """
+
     operation: Operation
     display_indexes: list[int]
     source_ids: list[int]
     next_display_index: int
 
 
-def _token_opcodes(text_tokens: list[tuple[str, int]], source_tokens: list[tuple[str, int]]) -> list[_Opcode]:
-    matcher = difflib.SequenceMatcher(a=[t for t, _ in text_tokens], b=[t for t, _ in source_tokens],
-                                      autojunk=False)  # pragma: no mutate - difflib tests autojunk for truthiness, so None equals False; True is killed by the frequent-word test
-    return [_resolve(opcode, text_tokens, source_tokens) for opcode in matcher.get_opcodes()]
+def _token_opcodes(
+    text_tokens: list[tuple[str, int]], source_tokens: list[tuple[str, int]]
+) -> list[_Opcode]:
+    matcher = difflib.SequenceMatcher(
+        a=[t for t, _ in text_tokens], b=[t for t, _ in source_tokens], autojunk=False
+    )  # pragma: no mutate - difflib tests autojunk for truthiness, so None equals False; True is killed by the frequent-word test
+    return [
+        _resolve(opcode, text_tokens, source_tokens) for opcode in matcher.get_opcodes()
+    ]
 
 
-def _resolve(opcode: tuple[Operation, int, int, int, int], text_tokens: list[tuple[str, int]],
-             source_tokens: list[tuple[str, int]]) -> _Opcode:
+def _resolve(
+    opcode: tuple[Operation, int, int, int, int],
+    text_tokens: list[tuple[str, int]],
+    source_tokens: list[tuple[str, int]],
+) -> _Opcode:
     operation, text_begin, text_end, source_begin, source_end = opcode
     next_token = text_tokens[min(text_begin, len(text_tokens) - 1)]
-    return _Opcode(operation=operation,
-                   display_indexes=[index for _, index in text_tokens[text_begin:text_end]],
-                   source_ids=[word_id for _, word_id in source_tokens[source_begin:source_end]],
-                   next_display_index=next_token[1])
+    return _Opcode(
+        operation=operation,
+        display_indexes=[index for _, index in text_tokens[text_begin:text_end]],
+        source_ids=[word_id for _, word_id in source_tokens[source_begin:source_end]],
+        next_display_index=next_token[1],
+    )
 
 
 class _TokenAlignment:
@@ -144,10 +170,14 @@ class _TokenAlignment:
         for word_id in opcode.source_ids:
             self.deleted_ids.append((opcode.next_display_index, word_id))
 
-    def display_words(self, display_texts: list[str], source_text_by_id: dict[int, str]) -> list[DisplayWord]:
+    def display_words(
+        self, display_texts: list[str], source_text_by_id: dict[int, str]
+    ) -> list[DisplayWord]:
         removed_before = self._resolve_deletions(len(display_texts))
-        return [self._display_word(index, text, removed_before[index], source_text_by_id)
-                for index, text in enumerate(display_texts)]
+        return [
+            self._display_word(index, text, removed_before[index], source_text_by_id)
+            for index, text in enumerate(display_texts)
+        ]
 
     def _resolve_deletions(self, display_count: int) -> list[dict[int, None]]:
         """A partly deleted source word changes its display word; a wholly deleted one is removed before
@@ -156,17 +186,28 @@ class _TokenAlignment:
         for next_index, word_id in self.deleted_ids:
             owner = self._owner_of(word_id)
             if owner is None:
-                removed_before[next_index][word_id] = None  # pragma: no mutate - an insertion-ordered set: values are never read
+                removed_before[next_index][word_id] = (
+                    None  # pragma: no mutate - an insertion-ordered set: values are never read
+                )
             else:
                 self.changed[owner] = True
         return removed_before
 
-    def _display_word(self, index: int, text: str, removed_ids: dict[int, None],
-                      source_text_by_id: dict[int, str]) -> DisplayWord:
+    def _display_word(
+        self,
+        index: int,
+        text: str,
+        removed_ids: dict[int, None],
+        source_text_by_id: dict[int, str],
+    ) -> DisplayWord:
         ids = tuple(sorted(self.source_ids[index]))
-        return DisplayWord(text=text, source_word_ids=ids, change=self._change_of(index, ids),
-                           original_text=" ".join(source_text_by_id[i] for i in ids),
-                           removed_before=" ".join(source_text_by_id[i] for i in removed_ids))
+        return DisplayWord(
+            text=text,
+            source_word_ids=ids,
+            change=self._change_of(index, ids),
+            original_text=" ".join(source_text_by_id[i] for i in ids),
+            removed_before=" ".join(source_text_by_id[i] for i in removed_ids),
+        )
 
     def _change_of(self, index: int, ids: tuple[int, ...]) -> Change:
         if not self.changed[index]:
@@ -180,5 +221,9 @@ class _TokenAlignment:
 
 
 # Opcodes turn the text into the source: "delete" is text-only, "insert" is source-only.
-_OPCODE_HANDLERS = {"equal": _TokenAlignment.link_equal, "replace": _TokenAlignment.link_block,
-                    "delete": _TokenAlignment.link_inserted, "insert": _TokenAlignment.delete}
+_OPCODE_HANDLERS = {
+    "equal": _TokenAlignment.link_equal,
+    "replace": _TokenAlignment.link_block,
+    "delete": _TokenAlignment.link_inserted,
+    "insert": _TokenAlignment.delete,
+}

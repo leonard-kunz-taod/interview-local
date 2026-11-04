@@ -1,15 +1,25 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Literal, Protocol, TypeVar
+
 import bisect
-import json
-from pathlib import Path
+import itertools
+from collections import Counter, defaultdict
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Literal
+
+AMBIGUOUS_OVERLAP_RATIO = 0.8
+SEGMENT_PAUSE_SECONDS = 1.5
+SEGMENT_MAX_SECONDS = 35
+UNRELIABLE_TIMINGS = {"estimated", "whisper_fallback"}
+WHISPER_TIMINGS = frozenset({"whisper", "whisper_fallback"})
+SEGMENT_FIELDS = ("start", "end", "text", "speaker", "uncertain", "overlap")
+SEGMENT_FLAG_LABELS = (
+    ("uncertain", "Review assignment"),
+    ("overlap", "Overlapping speech"),
+)
+
 
 Timing = Literal["whisper", "whisper_fallback", "aligned", "estimated"]
-WHISPER_TIMINGS = frozenset({"whisper", "whisper_fallback"})
-AMBIGUOUS_OVERLAP_RATIO = .8
-SEGMENT_MAX_PAUSE_SECONDS = 1.5
-SEGMENT_MAX_SECONDS = 35
 
 
 @dataclass
@@ -20,6 +30,7 @@ class Word:
     with Whisper timing; aligned and estimated words carry ``None`` because no
     Whisper word corresponds to them.
     """
+
     start: float
     end: float
     text: str
@@ -29,8 +40,11 @@ class Word:
     def __post_init__(self):
         has_whisper_timing = self.timing in WHISPER_TIMINGS
         if has_whisper_timing != (self.probability is not None):
-            raise ValueError(f"Word '{self.text}' with timing '{self.timing}' has an inconsistent "
-                             f"Whisper probability ({self.probability}).")
+            raise ValueError(
+                f"Word '{self.text}' with timing '{self.timing}' has an inconsistent "
+                f"Whisper probability ({self.probability})."
+            )
+
 
 @dataclass
 class Turn:
@@ -38,162 +52,68 @@ class Turn:
     end: float
     speaker: str
 
+
 @dataclass
 class DiarizationResult:
     exclusive: list[Turn]
     regular: list[Turn]
 
-class Transcriber(Protocol):
-    def transcribe(self, audio: Path) -> dict: ...
 
-class Diarizer(Protocol):
-    def diarize(self, audio: Path) -> DiarizationResult: ...
+def merge(
+    words: list[Word], turns: list[Turn], regular_turns: list[Turn] | None
+) -> dict:
+    """Assign words by exclusive overlap; separately retain simultaneous voices.
+
+    Args:
+        turns: Exclusive diarization turns used for word assignment.
+        regular_turns: Diarization turns that may overlap; None for legacy input
+            without them, which marks overlap detection unavailable.
+    """
+    turns = sorted(turns, key=lambda t: (t.start, t.end))
+    regular = regular_turns or []
+    labels = _speaker_labels(turns, regular)
+    regions = overlap_regions(regular, labels)
+    attributed = _attributed_words(words, turns, regions, labels)
+    return {
+        "schema_version": 2,
+        "language": "de",
+        "speakers": {label: f"Speaker {label}" for label in labels.values()},
+        "segments": _segments(attributed),
+        "words": attributed,
+        "diarization": _labelled(turns, labels),
+        "regular_diarization": _labelled(regular, labels),
+        "overlaps": regions,
+        "overlap_detection_available": regular_turns is not None,
+    }
 
 
-def overlap_regions(turns: list[Turn], mapping: dict) -> list[dict]:
+def overlap_regions(turns: list[Turn], mapping: dict[str, str]) -> list[dict]:
     """Sweep regular turns; duplicate tracks from one speaker are not overlap."""
-    from collections import Counter, defaultdict
-    events = defaultdict(Counter)
-    for turn in turns:
-        if turn.end > turn.start:
-            events[turn.start][turn.speaker] += 1
-            events[turn.end][turn.speaker] -= 1
-    active = Counter()
     regions = []
-    previous = None
-    for current, changes in sorted(events.items()):
-        speakers = sorted(mapping[s] for s, count in active.items() if count > 0)
-        if previous is not None and current > previous and len(speakers) > 1:
-            if regions and regions[-1]["end"] == previous and regions[-1]["speakers"] == speakers:
-                regions[-1]["end"] = current
-            else:
-                regions.append(dict(start=previous, end=current, speakers=speakers))
-        active.update(changes)
-        previous = current
+    for start, end, speakers in _simultaneous_intervals(turns, mapping):
+        if regions and _continues_region(regions[-1], start, speakers):
+            regions[-1]["end"] = end
+        else:
+            regions.append({"start": start, "end": end, "speakers": speakers})
     return regions
 
 
-def merge(words: list[Word], turns: list[Turn], regular_turns: list[Turn]) -> dict:
-    """Assign words by exclusive overlap; separately retain simultaneous voices."""
-    turns = sorted(turns, key=lambda t: (t.start, t.end))
-    mapping = _speaker_letters(turns, regular_turns)
-    regions = overlap_regions(regular_turns, mapping)
-    assigner = _WordAssigner(turns, regions, mapping)
-    assigned = [assigner.assign(word_id, word) for word_id, word in enumerate(words)]
-    return dict(schema_version=2, language="de",
-        speakers={letter: f"Speaker {letter}" for letter in mapping.values()},
-        segments=_group_segments(assigned), words=assigned, diarization=_lettered_turns(turns, mapping),
-        regular_diarization=_lettered_turns(regular_turns, mapping), overlaps=regions,
-        overlap_detection_available=True)
+def segment_words(segment: dict, timing: str) -> list[dict]:
+    """Words of an ASR segment labelled with the given timing source.
 
-
-def _speaker_letters(turns: list[Turn], regular_turns: list[Turn]) -> dict[str, str]:
-    """Letter A, B, … per diarization label: exclusive turn order first, then speakers heard only in regular turns."""
-    exclusive_labels = [t.speaker for t in turns]
-    regular_labels = [t.speaker for t in sorted(regular_turns, key=lambda t: t.start)]
-    labels = dict.fromkeys(exclusive_labels + regular_labels)
-    return {label: chr(65 + i) for i, label in enumerate(labels)}
-
-
-class _WordAssigner:
-    """Assigns words to the speaker of the most overlapping exclusive turn and marks simultaneous speech."""
-
-    def __init__(self, turns: list[Turn], regions: list[dict], mapping: dict[str, str]):
-        self.turns = turns
-        self.turn_starts = [t.start for t in turns]
-        self.regions = regions
-        self.region_starts = [r["start"] for r in regions]
-        self.mapping = mapping
-
-    def assign(self, word_id: int, word: Word) -> dict:
-        candidates = self._speaker_candidates(word)
-        simultaneous = self._simultaneous_speakers(word)
-        speaker = self.mapping[candidates[0][1].speaker] if candidates else None
-        reasons = _uncertainty_reasons(word, candidates, simultaneous)
-        return dict(word_id=word_id, start=word.start, end=word.end, text=word.text.strip(),
-            speaker=speaker, timing=word.timing, probability=word.probability,
-            uncertain=bool(reasons), uncertainty_reasons=reasons,
-            overlap=bool(simultaneous), overlap_speakers=sorted(simultaneous))
-
-    def _speaker_candidates(self, word: Word) -> list[tuple[float, Turn]]:
-        """Turns touching the word with their overlap in seconds, largest overlap first."""
-        nearby = _spans_near(word, self.turns, self.turn_starts)
-        candidates = [(_overlap_seconds(word, t.start, t.end), t) for t in nearby if _touches(word, t.start, t.end)]
-        return sorted(candidates, key=lambda item: item[0], reverse=True)
-
-    def _simultaneous_speakers(self, word: Word) -> set[str]:
-        nearby = _spans_near(word, self.regions, self.region_starts)
-        return {speaker for r in nearby if _touches(word, r["start"], r["end"]) for speaker in r["speakers"]}
-
-
-Span = TypeVar("Span")
-
-
-def _spans_near(word: Word, spans: list[Span], starts: list[float]) -> list[Span]:
-    """Spans sorted by start, from the last one starting at or before the word through the last one starting
-    no later than its end."""
-    first = max(0, bisect.bisect_right(starts, word.start) - 1)  # pragma: no mutate - an earlier first only adds spans every caller drops via _touches; a later first is killed by the speaker tests
-    return spans[first:bisect.bisect_right(starts, word.end)]
-
-
-def _overlap_seconds(word: Word, start: float, end: float) -> float:
-    return max(0., min(word.end, end) - max(word.start, start))
-
-
-def _touches(word: Word, start: float, end: float) -> bool:
-    """Whether a time span overlaps the word or, for a zero-length word, contains its instant."""
-    contains_instant = word.start == word.end and start <= word.start < end
-    return _overlap_seconds(word, start, end) > 0 or contains_instant
-
-
-def _uncertainty_reasons(word: Word, candidates: list[tuple[float, Turn]], simultaneous: set[str]) -> list[str]:
-    checks = [("no_matching_speaker", not candidates),
-              ("invalid_word_duration", word.end <= word.start),
-              ("estimated_or_fallback_timing", word.timing in {"estimated", "whisper_fallback"}),
-              ("ambiguous_speaker_boundary", _is_ambiguous(candidates)),
-              ("overlapping_speech", bool(simultaneous))]
-    return [reason for reason, applies in checks if applies]
-
-
-def _is_ambiguous(candidates: list[tuple[float, Turn]]) -> bool:
-    """Whether the runner-up turn overlaps the word nearly as much as the best one."""
-    return len(candidates) > 1 and candidates[1][0] >= candidates[0][0] * AMBIGUOUS_OVERLAP_RATIO
-
-
-def _group_segments(words: list[dict]) -> list[dict]:
-    segments = []
-    for word in words:
-        if not word["text"]:
-            continue
-        if _continues_segment(segments, word):
-            _extend_segment(segments[-1], word)
-        else:
-            segments.append(_start_segment(word))
-    return segments
-
-
-def _continues_segment(segments: list[dict], word: dict) -> bool:
-    return (bool(segments) and segments[-1]["speaker"] == word["speaker"]
-            and word["start"] - segments[-1]["end"] < SEGMENT_MAX_PAUSE_SECONDS
-            and word["end"] - segments[-1]["start"] < SEGMENT_MAX_SECONDS)
-
-
-def _extend_segment(segment: dict, word: dict) -> None:
-    segment["text"] += " " + word["text"]
-    segment["end"] = max(segment["end"], word["end"])
-    segment["uncertain"] |= word["uncertain"]
-    segment["overlap"] |= word["overlap"]
-    segment["word_ids"].append(word["word_id"])
-
-
-def _start_segment(word: dict) -> dict:
-    segment = {k: word[k] for k in ("start", "end", "text", "speaker", "uncertain", "overlap")}
-    segment["word_ids"] = [word["word_id"]]
-    return segment
-
-
-def _lettered_turns(turns: list[Turn], mapping: dict[str, str]) -> list[dict]:
-    return [dict(start=t.start, end=t.end, speaker=mapping[t.speaker]) for t in turns]
+    A segment without word timestamps becomes one word with estimated timing.
+    """
+    if segment["words"]:
+        return [dict(w, timing=timing) for w in segment["words"]]
+    return [
+        {
+            "start": segment["start"],
+            "end": segment["end"],
+            "text": segment["text"],
+            "timing": "estimated",
+            "probability": None,
+        }
+    ]
 
 
 def timestamp(value: float) -> str:
@@ -205,20 +125,201 @@ def timestamp(value: float) -> str:
 
 
 def render(result: dict) -> str:
-    lines = []
-    for s in result["segments"]:
-        name = result["speakers"].get(s["speaker"], "Unassigned")
-        flags = []
-        if s.get("uncertain"):
-            flags.append("Review assignment")
-        if s.get("overlap"):
-            flags.append("Overlapping speech")
-        flag = f" [{'; '.join(flags)}]" if flags else ""
-        lines.append(f"[{timestamp(s['start'])} – {timestamp(s['end'])}] {name}{flag}\n{s['text']}\n")
-    return "\n".join(lines) or "No speech detected."
+    blocks = [_rendered_segment(s, result["speakers"]) for s in result["segments"]]
+    return "\n".join(blocks) or "No speech detected."
 
 
-def export(result: dict, directory: Path) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "transcript.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    (directory / "transcript.txt").write_text(render(result), encoding="utf-8")
+def _rendered_segment(segment: dict, speakers: dict) -> str:
+    name = speakers.get(segment["speaker"], "Unassigned")
+    time_range = f"{timestamp(segment['start'])} – {timestamp(segment['end'])}"
+    return f"[{time_range}] {name}{_review_flags(segment)}\n{segment['text']}\n"
+
+
+def _review_flags(segment: dict) -> str:
+    flags = [label for key, label in SEGMENT_FLAG_LABELS if segment.get(key)]
+    return f" [{'; '.join(flags)}]" if flags else ""
+
+
+def _speaker_labels(turns: list[Turn], regular_turns: list[Turn]) -> dict[str, str]:
+    """Letter speakers in order of their first exclusive, then regular, turn."""
+    ordered = [*turns, *sorted(regular_turns, key=lambda t: t.start)]
+    ids = dict.fromkeys(t.speaker for t in ordered)
+    return {speaker: chr(ord("A") + i) for i, speaker in enumerate(ids)}
+
+
+def _simultaneous_intervals(
+    turns: list[Turn], mapping: dict[str, str]
+) -> Iterator[tuple[float, float, list[str]]]:
+    """Consecutive sweep intervals in which more than one speaker is active."""
+    active: Counter[str] = Counter()
+    events = sorted(_speaker_events(turns).items())
+    for (previous, changes), (current, _) in itertools.pairwise(events):
+        active.update(changes)
+        speakers = _active_labels(active, mapping)
+        if len(speakers) > 1:
+            yield previous, current, speakers
+
+
+def _speaker_events(turns: list[Turn]) -> dict[float, Counter[str]]:
+    """Per instant, how many tracks of each speaker start (+1) or end (-1)."""
+    events: defaultdict[float, Counter[str]] = defaultdict(Counter)
+    for turn in turns:
+        # pragma: no mutate start -- a zero-length turn adds +1 and -1 at one instant, so admitting it changes no count
+        if turn.end > turn.start:
+            # pragma: no mutate end
+            events[turn.start][turn.speaker] += 1
+            events[turn.end][turn.speaker] -= 1
+    return events
+
+
+def _active_labels(active: Counter[str], mapping: dict[str, str]) -> list[str]:
+    return sorted(mapping[s] for s, count in active.items() if count > 0)
+
+
+def _continues_region(region: dict, start: float, speakers: list[str]) -> bool:
+    return region["end"] == start and region["speakers"] == speakers
+
+
+def _attributed_words(
+    words: list[Word], turns: list[Turn], regions: list[dict], labels: dict[str, str]
+) -> list[dict]:
+    turn_starts = [t.start for t in turns]
+    region_starts = [r["start"] for r in regions]
+    attributed = []
+    for word_id, word in enumerate(words):
+        candidates = _ranked_candidates(word, turns, turn_starts)
+        simultaneous = _simultaneous_speakers(word, regions, region_starts)
+        reasons = _uncertainty_reasons(word, candidates, simultaneous)
+        attributed.append(
+            {
+                "word_id": word_id,
+                "start": word.start,
+                "end": word.end,
+                "text": word.text.strip(),
+                "speaker": _best_speaker(candidates, labels),
+                "timing": word.timing,
+                "probability": word.probability,
+                "uncertain": bool(reasons),
+                "uncertainty_reasons": reasons,
+                "overlap": bool(simultaneous),
+                "overlap_speakers": sorted(simultaneous),
+            }
+        )
+    return attributed
+
+
+def _ranked_candidates(
+    word: Word, turns: list[Turn], turn_starts: list[float]
+) -> list[tuple[float, Turn]]:
+    """Turns touching the word, paired with their overlap, largest first."""
+    # pragma: no mutate start -- exclusive turns never overlap, so no earlier turn reaches the word
+    first = max(0, bisect.bisect_right(turn_starts, word.start) - 1)
+    # pragma: no mutate end
+    candidates = []
+    # pragma: no mutate start -- exclusive turns never overlap, so no earlier turn reaches the word
+    for i in range(first, len(turns)):
+        # pragma: no mutate end
+        turn = turns[i]
+        if turn.start > word.end:
+            break
+        if _touches(word, turn.start, turn.end):
+            overlap = max(0.0, min(word.end, turn.end) - max(word.start, turn.start))
+            candidates.append((overlap, turn))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates
+
+
+def _best_speaker(
+    candidates: list[tuple[float, Turn]], labels: dict[str, str]
+) -> str | None:
+    """Label of the most overlapping turn; None leaves the word unassigned."""
+    return labels[candidates[0][1].speaker] if candidates else None
+
+
+def _simultaneous_speakers(
+    word: Word, regions: list[dict], region_starts: list[float]
+) -> set[str]:
+    # pragma: no mutate start -- swept regions are disjoint, so no earlier region reaches the word
+    first = max(0, bisect.bisect_right(region_starts, word.start) - 1)
+    # pragma: no mutate end
+    speakers = set()
+    # pragma: no mutate start -- swept regions are disjoint, so no earlier region reaches the word
+    for i in range(first, len(regions)):
+        # pragma: no mutate end
+        region = regions[i]
+        if region["start"] > word.end:
+            break
+        if _touches(word, region["start"], region["end"]):
+            speakers.update(region["speakers"])
+    return speakers
+
+
+def _touches(word: Word, start: float, end: float) -> bool:
+    """A word touches an interval it overlaps or, if zero-length, lies inside."""
+    overlaps = min(word.end, end) > max(word.start, start)
+    contains_instant = word.start == word.end and start <= word.start < end
+    return overlaps or contains_instant
+
+
+def _uncertainty_reasons(
+    word: Word, candidates: list[tuple[float, Turn]], simultaneous: set[str]
+) -> list[str]:
+    checks = (
+        ("no_matching_speaker", not candidates),
+        ("invalid_word_duration", word.end <= word.start),
+        ("estimated_or_fallback_timing", word.timing in UNRELIABLE_TIMINGS),
+        ("ambiguous_speaker_boundary", _ambiguous_boundary(candidates)),
+        ("overlapping_speech", bool(simultaneous)),
+    )
+    return [reason for reason, applies in checks if applies]
+
+
+def _ambiguous_boundary(candidates: list[tuple[float, Turn]]) -> bool:
+    """The runner-up turn overlaps the word nearly as much as the best one."""
+    return (
+        len(candidates) > 1
+        and candidates[1][0] >= candidates[0][0] * AMBIGUOUS_OVERLAP_RATIO
+    )
+
+
+def _segments(words: list[dict]) -> list[dict]:
+    """Join consecutive words of one speaker into readable segments."""
+    segments = []
+    for word in _words_with_text(words):
+        if segments and _continues(segments[-1], word):
+            _append_word(segments[-1], word)
+        else:
+            segments.append(_new_segment(word))
+    return segments
+
+
+def _words_with_text(words: list[dict]) -> list[dict]:
+    return [w for w in words if w["text"]]
+
+
+def _append_word(segment: dict, word: dict) -> None:
+    segment["text"] += " " + word["text"]
+    segment["end"] = max(segment["end"], word["end"])
+    segment["uncertain"] |= word["uncertain"]
+    segment["overlap"] |= word["overlap"]
+    segment["word_ids"].append(word["word_id"])
+
+
+def _new_segment(word: dict) -> dict:
+    segment = {key: word[key] for key in SEGMENT_FIELDS}
+    segment["word_ids"] = [word["word_id"]]
+    return segment
+
+
+def _continues(segment: dict, word: dict) -> bool:
+    return (
+        segment["speaker"] == word["speaker"]
+        and word["start"] - segment["end"] < SEGMENT_PAUSE_SECONDS
+        and word["end"] - segment["start"] < SEGMENT_MAX_SECONDS
+    )
+
+
+def _labelled(turns: list[Turn], labels: dict[str, str]) -> list[dict]:
+    return [
+        {"start": t.start, "end": t.end, "speaker": labels[t.speaker]} for t in turns
+    ]

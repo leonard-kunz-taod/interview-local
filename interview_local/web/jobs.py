@@ -1,12 +1,14 @@
 """Background transcription of one uploaded recording into its run directory."""
+
 from __future__ import annotations
-from dataclasses import dataclass
+
 import os
-from pathlib import Path
 import threading
 import traceback
-from typing import Final, Literal
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, Literal
 
 from ..artifacts import save_readable, save_speakers
 from ..llm import OllamaClient, enhance
@@ -22,6 +24,7 @@ PHASE_LLM: Final = "llm"
 @dataclass(frozen=True)
 class JobStatus:
     """A snapshot of a job's progress for the browser."""
+
     run_id: str
     state: JobState
     phase: JobPhase
@@ -40,16 +43,25 @@ class TranscriptionJob:
         self._lock = threading.Lock()
         self._state: JobState = "running"
         self._phase: JobPhase = PHASE_SPEECH_RECOGNITION
-        self._detail = "Starting"  # pragma: no mutate - progress wording shown to the user
+        self._detail = (
+            "Starting"  # pragma: no mutate - progress wording shown to the user
+        )
         self._error: str | None = None
 
     def start(self) -> None:
-        threading.Thread(target=self._run, name=f"transcription-{self.job_id}", daemon=True).start()
+        threading.Thread(
+            target=self._run, name=f"transcription-{self.job_id}", daemon=True
+        ).start()
 
     def status(self) -> JobStatus:
         with self._lock:
-            return JobStatus(run_id=self.run_dir.name, state=self._state,
-                             phase=self._phase, detail=self._detail, error=self._error)
+            return JobStatus(
+                run_id=self.run_dir.name,
+                state=self._state,
+                phase=self._phase,
+                detail=self._detail,
+                error=self._error,
+            )
 
     @property
     def running(self) -> bool:
@@ -59,7 +71,7 @@ class TranscriptionJob:
     def _run(self) -> None:
         try:
             self._transcribe()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             with self._lock:
                 self._state = "failed"
@@ -67,17 +79,25 @@ class TranscriptionJob:
             return
         with self._lock:
             self._state = "done"
-            self._detail = "Done"  # pragma: no mutate - progress wording shown to the user
+            self._detail = (
+                "Done"  # pragma: no mutate - progress wording shown to the user
+            )
 
     def _transcribe(self) -> None:
-        client = OllamaClient()
-        client.ready()
+        OllamaClient().ready()
         token = diarization_token()
-        result = process(self.audio, status=self._record_status, token=token, output_dir=self.run_dir)
+        result = process(
+            self.audio,
+            status=self._record_status,
+            token=token,
+            offline=False,
+            alignment=False,
+            output_dir=self.run_dir,
+        )
         result["speakers"].update(self.speaker_names)
         save_speakers(result, self.run_dir)
         self._enter_phase(PHASE_LLM)
-        save_readable(enhance(result, client=client, status=self._record_status), self.run_dir)
+        save_readable(enhance(result, self._record_status), self.run_dir)
 
     def _record_status(self, message: str) -> None:
         if message == STEPS["check-access"]:
@@ -97,14 +117,18 @@ def diarization_token() -> str | None:
         RuntimeError: If neither the local model nor any HF credential exists.
     """
     from ..models import local_diarization_model
+
     if local_diarization_model():
         return None
     if os.environ.get("HF_TOKEN"):
         return os.environ["HF_TOKEN"]
     from huggingface_hub import get_token
+
     cached = get_token()
     if cached:
         return cached
-    raise RuntimeError("Speaker recognition needs the local community-1 folder (models/community-1), "
-                       "the HF_TOKEN environment variable or a cached Hugging Face login "
-                       "(.venv/bin/hf auth login). The web UI does not ask for tokens.")
+    raise RuntimeError(
+        "Speaker recognition needs the local community-1 folder (models/community-1), "
+        "the HF_TOKEN environment variable or a cached Hugging Face login "
+        "(.venv/bin/hf auth login). The web UI does not ask for tokens."
+    )

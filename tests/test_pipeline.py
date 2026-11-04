@@ -1,282 +1,459 @@
+# German fixtures intentionally exercise non-ASCII speech and paths.
 import json
 import os
-from pathlib import Path
-import subprocess
 import sys
 import tempfile
-import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-import numpy as np
-import soundfile as sf
+from support.fake_process import FakeProcess
+from support.fake_worker import OUTPUTS, TURNS, WORDS, FakeWorker
+from support.platform_encoding import windows_default_encoding
+from support.platform_files import case_sensitive_file_names
 
-from interview_local.pipeline import process, worker
-from run_fixtures import ASR_OUTPUT, STAGE_OUTPUTS, speech_models, uncached_speech_models
+from interview_local.models import DIARIZATION_ID, WHISPER_MODEL
+from interview_local.pipeline import (
+    FAILURE_DETAIL_LINES,
+    STEPS,
+    WORKSPACE_PREFIX,
+    prepare,
+    process,
+    transcribe,
+    worker,
+)
+from interview_local.worker import REDACTED
 
-INTERRUPT_SECONDS = 5
-STOP_TIMEOUT_FOR_TESTS = .5
-DECODED_SAMPLE_RATE = 16000
-SPEECH_MODELS = speech_models()
-
-ALIGNED_STAGE_OUTPUTS = {
-    "asr": {"segments": []},
-    "align": [{"start": 0, "end": 1, "text": "Hallo", "timing": "aligned", "probability": None}],
-    "diarize": {"exclusive": [{"start": 0, "end": 1, "speaker": "s0"}], "regular": []}}
-
-
-def aligning_speech_models(stages_run, work_dirs):
-    """Stand-in for the model workers of an aligned run; records each started stage and its work directory."""
-    def worker(stage, source, target, *args):
-        stages_run.append(stage)
-        work_dirs.append(target.parent)
-        if stage == "decode":
-            target.touch()
-        elif stage in ALIGNED_STAGE_OUTPUTS:
-            target.write_text(json.dumps(ALIGNED_STAGE_OUTPUTS[stage]))
-    return worker
+RAW = {"segments": [{"start": 0, "end": 1, "text": "Original", "words": []}]}
+TERMINATION_GRACE_SECONDS = 10
 
 
-class PipelineTests(unittest.TestCase):
-    def aligned_run(self):
-        """Process a recording with alignment; return (result, stages run, work directories)."""
-        stages_run, work_dirs = [], []
-        with tempfile.TemporaryDirectory() as d:
-            source = Path(d) / "test.m4a"
-            source.touch()
-            with patch("interview_local.pipeline.worker", aligning_speech_models(stages_run, work_dirs)):
-                result = process(source, Path(d) / "output", status=lambda _: None, alignment=True)
-        return result, stages_run, work_dirs
-
-    def test_model_stages_run_one_after_another(self):
-        _, stages_run, _ = self.aligned_run()
-        self.assertEqual(stages_run, ["decode", "asr", "check-access", "align", "diarize"])
-
-    def test_aligned_words_are_attributed_to_speakers(self):
-        result, _, _ = self.aligned_run()
-        self.assertEqual(result["segments"][0]["speaker"], "A")
-
-    def test_temporary_work_directory_is_removed(self):
-        _, _, work_dirs = self.aligned_run()
-        self.assertEqual([p.exists() for p in work_dirs], [False] * len(work_dirs))
-
-    def test_missing_audio_is_rejected(self):
-        with tempfile.TemporaryDirectory() as d, self.assertRaises(ValueError):
-            process(Path(d) / "missing.wav", Path(d) / "output")
-
-    def test_failing_model_stage_fails_the_run(self):
-        with tempfile.TemporaryDirectory() as d:
-            audio = Path(d) / "broken.wav"
-            audio.touch()
-            with patch("interview_local.pipeline.worker", side_effect=RuntimeError("Broken")), \
-                    self.assertRaises(RuntimeError):
-                process(audio, Path(d) / "output", status=lambda _: None)
-
-class DecodeFailureTests(unittest.TestCase):
-    def test_unreadable_audio_gets_its_own_message(self):
-        with tempfile.TemporaryDirectory() as d:
-            fake = Path(d)/"notes.wav"
-            fake.write_text("This is not audio.")
-            with self.assertRaises(RuntimeError) as raised:
-                worker("decode", fake, Path(d)/"decoded.wav", status=lambda _: None, token=None)
-        message = str(raised.exception)
-        names_audio_cause_without_login_advice = ("could not be read as audio" in message, "401/403" in message)
-        self.assertEqual(names_audio_cause_without_login_advice, (True, False))
-
-def scripted_stage(script):
-    """Replace the model worker command with a Python script; the environment is passed on unchanged."""
-    real_popen = subprocess.Popen
-
-    def popen(command, **kwargs):
-        return real_popen([sys.executable, "-c", script], **kwargs)
-    return patch("interview_local.pipeline.subprocess.Popen", popen)
+def silent(_message):
+    pass
 
 
-def speech_models_transcribing(transcript):
-    """Stand-in for the model worker processes whose speech recognition returns the given transcript."""
-    outputs = dict(STAGE_OUTPUTS, asr=json.dumps(transcript))
-
-    def worker(stage, source, target, *args):
-        if stage in outputs:
-            target.write_text(outputs[stage])
-    return worker
-
-
-def interrupting_status(line):
-    raise KeyboardInterrupt
-
-
-class WorkerTests(unittest.TestCase):
-    def failure_of(self, script: str, stage: str = "asr", token: str | None = None, offline: bool = False) -> str:
-        with scripted_stage(script), self.assertRaises(RuntimeError) as raised:
-            worker(stage, Path("in"), Path("out"), status=lambda _: None, token=token, offline=offline)
-        return str(raised.exception)
-
-    def test_progress_lines_are_reported_and_other_output_is_not(self):
-        reported = []
-        with scripted_stage("print('Loading model'); print('noise'); print('Transcribed through 5 seconds')"):
-            worker("asr", Path("in"), Path("out"), status=reported.append, token=None)
-        self.assertEqual(reported, ["Loading model", "Transcribed through 5 seconds"])
-
-    def test_token_is_redacted_from_failure_details(self):
-        message = self.failure_of("import os; print('token', os.environ['HF_TOKEN']); raise SystemExit(1)",
-                                  token="hf_secret")
-        self.assertEqual(("hf_secret" in message, "token [Token redacted]" in message), (False, True))
-
-    def test_offline_run_keeps_the_child_offline(self):
-        message = self.failure_of("import os; print('offline', os.environ['HF_HUB_OFFLINE'], "
-                                  "os.environ['TRANSFORMERS_OFFLINE']); raise SystemExit(1)", offline=True)
-        self.assertIn("offline 1 1", message)
-
-    def test_child_telemetry_is_disabled(self):
-        message = self.failure_of("import os; print('telemetry', os.environ['HF_HUB_DISABLE_TELEMETRY'], "
-                                  "os.environ['PYANNOTE_METRICS_ENABLED']); raise SystemExit(1)")
-        self.assertIn("telemetry 1 0", message)
-
-    def test_failure_details_keep_the_last_eighteen_lines(self):
-        message = self.failure_of("[print(f'line {i}') for i in range(30)]; raise SystemExit(1)")
-        last_eighteen_lines = "\n".join(f"line {i}" for i in range(12, 30))
-        self.assertEqual(("line 11" in message, message.endswith(last_eighteen_lines)), (False, True))
-
-    def test_failure_details_include_the_error_output(self):
-        message = self.failure_of("import sys; print('model file corrupt', file=sys.stderr); raise SystemExit(1)")
-        self.assertIn("model file corrupt", message)
-
-    def test_undecodable_output_is_replaced_instead_of_failing_the_relay(self):
-        message = self.failure_of("import sys; sys.stdout.buffer.write(b'bad \\xff byte\\n'); raise SystemExit(1)")
-        self.assertIn("bad � byte", message)
-
-    def test_stage_without_offline_flag_lets_the_child_download(self):
-        with (patch.dict(os.environ), scripted_stage("import os; print('offline', os.environ.get('HF_HUB_OFFLINE')); "
-                                                     "raise SystemExit(1)"),
-              self.assertRaises(RuntimeError) as raised):
-            os.environ.pop("HF_HUB_OFFLINE", None)
-            worker("prepare-asr", Path("in"), Path("out"), lambda _: None, None)
-        self.assertIn("offline None", str(raised.exception))
-
-    def test_interrupt_kills_a_child_that_ignores_termination(self):
-        started = time.monotonic()
-        script = ("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                  "print('Loading', flush=True); time.sleep(60)")
-        with (patch("interview_local.pipeline.STOP_TIMEOUT_SECONDS", STOP_TIMEOUT_FOR_TESTS),
-              scripted_stage(script), self.assertRaises(KeyboardInterrupt)):
-            worker("asr", Path("in"), Path("out"), status=interrupting_status, token=None)
-        self.assertLess(time.monotonic() - started, INTERRUPT_SECONDS)
-
-    def test_decode_stage_converts_a_recording_into_the_working_wav(self):
-        with tempfile.TemporaryDirectory() as d:
-            recording, decoded = Path(d) / "interview.wav", Path(d) / "original.wav"
-            sf.write(recording, np.zeros(DECODED_SAMPLE_RATE // 10, dtype="float32"), DECODED_SAMPLE_RATE)
-            worker("decode", recording, decoded, status=lambda _: None, token=None)
-            info = sf.info(decoded)
-        self.assertEqual((info.samplerate, info.channels, info.frames), (DECODED_SAMPLE_RATE, 1, DECODED_SAMPLE_RATE // 10))
-
-    def test_failed_model_stage_gives_login_advice(self):
-        self.assertIn("401/403", self.failure_of("raise SystemExit(1)", stage="diarize"))
-
-    def test_successful_stage_returns_quietly(self):
-        with scripted_stage("print('done')"):
-            self.assertIsNone(worker("asr", Path("in"), Path("out"), status=lambda _: None, token=None))
-
-    def test_interrupt_stops_the_child_and_propagates(self):
-        started = time.monotonic()
-        with (scripted_stage("import time; print('Loading', flush=True); time.sleep(60)"),
-              self.assertRaises(KeyboardInterrupt)):
-            worker("asr", Path("in"), Path("out"), status=interrupting_status, token=None)
-        self.assertLess(time.monotonic() - started, INTERRUPT_SECONDS)
+def processed(audio, output_dir, alignment=False):
+    """Process audio online without a token, reporting nothing."""
+    return process(audio, silent, None, False, alignment, output_dir)
 
 
 class ProcessTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.directory.name)
-        self.audio = self.root / "interview.wav"
-        self.audio.touch()
-        self.output = self.root / "output"
-        self.messages = []
+    def run_process(self, outputs, alignment=False, offline=False, status=silent):
+        worker = FakeWorker(outputs)
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "test.m4a"
+            audio.touch()
+            output = Path(directory) / "output"
+            with patch("interview_local.pipeline.worker", worker):
+                result = process(audio, status, None, offline, alignment, output)
+        return worker, result
 
-    def tearDown(self):
-        self.directory.cleanup()
+    def test_speech_stages_run_sequentially_in_separate_workers(self):
+        worker, _ = self.run_process(OUTPUTS, alignment=True)
+        self.assertEqual(
+            worker.stages, ["decode", "asr", "check-access", "align", "diarize"]
+        )
 
-    def run_process(self, stages=SPEECH_MODELS, **options):
-        with patch("interview_local.pipeline.worker", stages):
-            return process(self.audio, self.output, status=self.messages.append, **options)
+    def test_temporary_workspace_is_removed_after_processing(self):
+        worker, _ = self.run_process(OUTPUTS, alignment=True)
+        self.assertFalse(any(path.exists() for path in worker.workspaces))
 
-    def test_unsupported_format_is_rejected(self):
-        flac = self.root / "interview.flac"
-        flac.touch()
-        with self.assertRaises(ValueError):
-            process(flac, self.output)
+    def test_temporary_workspace_is_named_for_the_app(self):
+        worker, _ = self.run_process(OUTPUTS, alignment=True)
+        self.assertTrue(worker.workspaces[0].name.startswith(WORKSPACE_PREFIX))
 
-    def test_existing_stage_files_are_never_overwritten(self):
-        self.output.mkdir()
-        (self.output / "02_speakers.txt").touch()
-        with self.assertRaises(ValueError):
-            self.run_process()
+    def test_offline_processing_runs_every_worker_offline(self):
+        worker, _ = self.run_process(OUTPUTS, alignment=True, offline=True)
+        self.assertEqual(worker.offline, {True})
 
-    def test_raw_only_stops_after_speech_recognition(self):
-        raw = self.run_process(raw_only=True)
-        saved = sorted(p.name for p in self.output.iterdir())
-        self.assertEqual((raw["stage"], raw["source"], saved), ("raw", "interview.wav", ["01_raw.json", "01_raw.txt"]))
+    def test_words_are_attributed_to_the_diarized_speaker(self):
+        _, result = self.run_process(OUTPUTS, alignment=True)
+        self.assertEqual([w["speaker"] for w in result["words"]], ["A"])
 
-    def test_speaker_transcript_is_saved_beside_the_raw_transcript(self):
-        self.run_process()
-        self.assertEqual(sorted(p.name for p in self.output.iterdir()),
-                         ["01_raw.json", "01_raw.txt", "02_speakers.json", "02_speakers.txt"])
+    def test_speaker_stage_embeds_the_raw_transcript_it_came_from(self):
+        _, result = self.run_process(OUTPUTS, alignment=True)
+        self.assertEqual(
+            (result["stage"], result["raw_transcript"]),
+            (
+                "speakers",
+                {
+                    "schema_version": 2,
+                    "stage": "raw",
+                    "source": "test.m4a",
+                    "segments": [],
+                },
+            ),
+        )
 
-    def test_without_alignment_whisper_words_keep_their_timing(self):
-        result = self.run_process()
-        self.assertEqual(([w["timing"] for w in result["words"]], result["metadata"]["word_timing_counts"]),
-                         (["whisper", "whisper"], {"whisper": 2}))
+    def test_metadata_describes_the_run(self):
+        _, result = self.run_process(OUTPUTS, alignment=True)
+        self.assertEqual(
+            result["metadata"],
+            {
+                "word_timing_counts": {"aligned": 1},
+                "source": "test.m4a",
+                "transcription": f"faster-whisper/{WHISPER_MODEL}",
+                "diarization": DIARIZATION_ID,
+                "alignment": True,
+                "device": "cpu",
+                "compute_type": "int8 (ASR), float32 (diarization/alignment)",
+                "requested_speakers": 2,
+                "detected_speakers": 1,
+                "warnings": [
+                    "Automatic transcript: review text and speaker changes before use.",
+                    (
+                        "The model did not detect exactly two speakers despite the "
+                        "requested count."
+                    ),
+                ],
+            },
+        )
 
-    def test_without_alignment_the_whisper_timestamps_are_announced(self):
-        self.run_process()
-        self.assertIn("3/5 Use Whisper word timestamps (no additional alignment)", self.messages)
+    def test_two_detected_speakers_add_no_speaker_warning(self):
+        two_speakers = [
+            {"start": 0, "end": 0.5, "speaker": "s0"},
+            {"start": 0.5, "end": 1, "speaker": "s1"},
+        ]
+        diarization = {"exclusive": two_speakers, "regular": two_speakers}
+        _, result = self.run_process(dict(OUTPUTS, diarize=diarization))
+        self.assertEqual(
+            result["metadata"]["warnings"],
+            ["Automatic transcript: review text and speaker changes before use."],
+        )
 
-    def test_segment_without_words_gets_estimated_timing(self):
-        transcript = {"segments": [{"start": 0, "end": 1, "text": "Guten Tag", "words": []}], "language": "de"}
-        result = self.run_process(stages=speech_models_transcribing(transcript))
-        self.assertEqual([(w["text"], w["timing"]) for w in result["words"]], [("Guten Tag", "estimated")])
+    def test_progress_reports_every_stage_and_where_the_raw_stage_was_saved(self):
+        messages = []
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "test.wav"
+            audio.touch()
+            output = Path(directory) / "output"
+            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+                process(audio, messages.append, None, False, True, output)
+            saved_raw = output / "01_raw.txt"
+        steps = [m for m in messages if m in STEPS.values() or str(saved_raw) in m]
+        self.assertEqual(
+            steps,
+            [
+                STEPS["decode"],
+                STEPS["asr"],
+                f"Original speech recognition output saved: {saved_raw}",
+                STEPS["check-access"],
+                STEPS["align"],
+                STEPS["diarize"],
+            ],
+        )
 
-    def test_regular_diarization_enables_overlap_detection(self):
-        self.assertTrue(self.run_process()["overlap_detection_available"])
+    def test_fewer_than_two_detected_speakers_adds_a_warning(self):
+        _, result = self.run_process(OUTPUTS, alignment=True)
+        self.assertEqual(
+            result["metadata"]["warnings"],
+            [
+                "Automatic transcript: review text and speaker changes before use.",
+                (
+                    "The model did not detect exactly two speakers despite the "
+                    "requested count."
+                ),
+            ],
+        )
 
-    def test_fewer_than_two_speakers_are_warned_about(self):
-        warnings = self.run_process()["metadata"]["warnings"]
-        self.assertIn("The model did not detect exactly two speakers despite the requested count.", warnings)
+    def test_without_alignment_whisper_word_timestamps_are_used(self):
+        words = [
+            {
+                "start": 0,
+                "end": 0.4,
+                "text": "Hallo",
+                "timing": "whisper",
+                "probability": 0.9,
+            },
+            {
+                "start": 0.4,
+                "end": 1,
+                "text": "Welt",
+                "timing": "whisper",
+                "probability": 0.9,
+            },
+        ]
+        segment = {"start": 0, "end": 1, "text": " Hallo Welt", "words": words}
+        outputs = dict(OUTPUTS, asr={"segments": [segment]})
+        _, result = self.run_process(outputs)
+        timings = [w["timing"] for w in result["words"]]
+        self.assertEqual(timings, ["whisper", "whisper"])
 
-    def test_raw_transcript_names_its_schema_stage_and_source(self):
-        raw = self.run_process(raw_only=True)
-        self.assertEqual({key: raw[key] for key in ("schema_version", "stage", "source", "language")},
-                         {"schema_version": 2, "stage": "raw", "source": "interview.wav", "language": "de"})
+    def test_segment_without_word_timestamps_becomes_one_estimated_word(self):
+        segment = {"start": 0, "end": 1, "text": " Hallo Welt", "words": []}
+        outputs = dict(OUTPUTS, asr={"segments": [segment]})
+        _, result = self.run_process(outputs)
+        words = [(w["text"], w["timing"]) for w in result["words"]]
+        self.assertEqual(words, [("Hallo Welt", "estimated")])
 
-    def test_speaker_transcript_records_its_provenance(self):
-        metadata = dict(self.run_process()["metadata"])
-        del metadata["warnings"]
-        self.assertEqual(metadata, {"word_timing_counts": {"whisper": 2}, "source": "interview.wav",
-                                        "transcription": "faster-whisper/large-v3",
-                                        "diarization": "pyannote/speaker-diarization-community-1", "alignment": False,
-                                        "device": "cpu", "compute_type": "int8 (ASR), float32 (diarization/alignment)",
-                                        "requested_speakers": 2, "detected_speakers": 1})
+    def test_legacy_exclusive_turns_disable_overlap_detection(self):
+        outputs = dict(OUTPUTS, diarize=TURNS)
+        _, result = self.run_process(outputs, alignment=True)
+        self.assertFalse(result["overlap_detection_available"])
 
-    def test_missing_output_directory_is_created_with_its_parents(self):
-        self.output = self.root / "transcripts" / "interview-01"
-        self.run_process(raw_only=True)
-        self.assertTrue((self.output / "01_raw.json").is_file())
+    def test_regular_turns_enable_overlap_detection(self):
+        _, result = self.run_process(OUTPUTS, alignment=True)
+        self.assertTrue(result["overlap_detection_available"])
 
-    def test_processing_without_the_offline_option_may_download_models(self):
-        result = self.run_process(stages=uncached_speech_models())
-        self.assertEqual(result["stage"], "speakers")
+    def test_speaker_stage_is_saved_to_the_output_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "test.wav"
+            audio.touch()
+            output = Path(directory) / "output"
+            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+                processed(audio, output, alignment=True)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            saved, ["01_raw.json", "01_raw.txt", "02_speakers.json", "02_speakers.txt"]
+        )
 
-    def test_offline_processing_uses_only_cached_models(self):
-        with self.assertRaisesRegex(RuntimeError, "not in the local cache"):
-            self.run_process(stages=uncached_speech_models(), offline=True)
+    def test_stage_results_are_found_on_a_case_sensitive_file_system(self):
+        with case_sensitive_file_names():
+            _, result = self.run_process(OUTPUTS, alignment=True)
+        self.assertEqual([w["speaker"] for w in result["words"]], ["A"])
 
-    def test_speaker_transcript_embeds_the_raw_transcript(self):
-        result = self.run_process()
-        self.assertEqual((result["stage"], result["raw_transcript"]["segments"]),
-                         ("speakers", ASR_OUTPUT["segments"]))
+    def test_german_worker_results_are_read_where_the_platform_default_is_not(self):
+        aligned = [dict(WORDS[0], text="Grüße")]
+        with windows_default_encoding():
+            _, result = self.run_process(dict(OUTPUTS, align=aligned), alignment=True)
+        self.assertEqual([w["text"] for w in result["words"]], ["Grüße"])
+
+    def test_missing_parent_folders_of_the_output_directory_are_created(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "test.wav"
+            audio.touch()
+            output = Path(directory) / "interviews" / "first"
+            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+                processed(audio, output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(
+            saved, ["01_raw.json", "01_raw.txt", "02_speakers.json", "02_speakers.txt"]
+        )
+
+
+class TranscribeTests(unittest.TestCase):
+    def transcribed(self, offline=False):
+        worker = FakeWorker(OUTPUTS)
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "test.wav"
+            audio.touch()
+            with patch("interview_local.pipeline.worker", worker):
+                raw = transcribe(audio, silent, offline, Path(directory) / "output")
+        return worker, raw
+
+    def test_raw_transcription_stops_after_speech_recognition(self):
+        worker, _ = self.transcribed()
+        self.assertEqual(worker.stages, ["decode", "asr"])
+
+    def test_raw_transcription_returns_the_raw_stage(self):
+        _, raw = self.transcribed()
+        self.assertEqual(
+            raw,
+            {"schema_version": 2, "stage": "raw", "source": "test.wav", "segments": []},
+        )
+
+    def test_offline_transcription_runs_every_worker_offline(self):
+        worker, _ = self.transcribed(offline=True)
+        self.assertEqual(worker.offline, {True})
+
+    def test_transcription_workspace_is_named_for_the_app(self):
+        worker, _ = self.transcribed()
+        self.assertTrue(worker.workspaces[0].name.startswith(WORKSPACE_PREFIX))
+
+
+class PrepareTests(unittest.TestCase):
+    def prepared(self, alignment, token=None):
+        worker = FakeWorker({})
+        with patch("interview_local.pipeline.worker", worker):
+            prepare(silent, token, alignment)
+        return worker
+
+    def test_preparation_loads_diarization_and_speech_models(self):
+        self.assertEqual(
+            self.prepared(alignment=False).stages, ["prepare-diarize", "prepare-asr"]
+        )
+
+    def test_preparation_with_alignment_also_loads_the_alignment_model(self):
+        self.assertEqual(
+            self.prepared(alignment=True).stages,
+            ["prepare-diarize", "prepare-asr", "prepare-align"],
+        )
+
+    def test_preparation_hands_the_token_to_every_worker(self):
+        self.assertEqual(self.prepared(False, token="hf_token").tokens, {"hf_token"})
+
+    def test_preparation_always_runs_online(self):
+        self.assertEqual(self.prepared(alignment=True).offline, {False})
+
+
+class InputTests(unittest.TestCase):
+    def test_missing_audio_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.wav"
+            with self.assertRaises(ValueError):
+                processed(missing, Path(directory) / "output")
+
+    def test_unsupported_audio_format_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.ogg"
+            audio.touch()
+            with self.assertRaises(ValueError):
+                processed(audio, Path(directory) / "output")
+
+    def test_output_directory_with_completed_stages_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            audio.touch()
+            (Path(directory) / "01_raw.json").touch()
+            with self.assertRaises(ValueError):
+                processed(audio, Path(directory))
+
+    def test_worker_failure_propagates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "broken.wav"
+            audio.touch()
+            with (
+                patch(
+                    "interview_local.pipeline.worker",
+                    side_effect=RuntimeError("Broken"),
+                ),
+                self.assertRaises(RuntimeError),
+            ):
+                processed(audio, Path(directory) / "output")
+
+
+class PreservationTests(unittest.TestCase):
+    def fail_after_raw_stage(self, output):
+        def worker(stage, source, target, *args):
+            if stage == "decode":
+                target.touch()
+            elif stage == "asr":
+                target.write_text(json.dumps(RAW))
+            elif stage == "check-access":
+                raise RuntimeError("Access denied")
+
+        audio = output.parent / "audio.wav"
+        audio.touch()
+        with (
+            patch("interview_local.pipeline.worker", worker),
+            self.assertRaises(RuntimeError),
+        ):
+            processed(audio, output)
+
+    def test_raw_stage_files_survive_a_later_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            self.fail_after_raw_stage(output)
+            saved = sorted(os.listdir(output))
+        self.assertEqual(saved, ["01_raw.json", "01_raw.txt"])
+
+    def test_preserved_raw_json_holds_the_original_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            self.fail_after_raw_stage(output)
+            raw = json.loads((output / "01_raw.json").read_text())
+        self.assertEqual(raw["segments"], RAW["segments"])
+
+
+class WorkerLaunchTests(unittest.TestCase):
+    """The child process a stage runs in, with its output scripted."""
+
+    def launched(self, child, token=None, offline=False, status=silent):
+        with (
+            patch.dict(os.environ, clear=True),
+            patch("subprocess.Popen", child),
+        ):
+            worker("decode", Path("in.wav"), Path("out.wav"), status, token, offline)
+        return child
+
+    def failure(self, output):
+        with self.assertRaises(RuntimeError) as failure:
+            self.launched(FakeProcess(output, exit_code=1))
+        return str(failure.exception)
+
+    def test_stage_runs_as_the_worker_module_with_its_paths(self):
+        child = self.launched(FakeProcess())
+        self.assertEqual(
+            child.commands,
+            [
+                [
+                    sys.executable,
+                    "-m",
+                    "interview_local.worker",
+                    "decode",
+                    "in.wav",
+                    "out.wav",
+                ]
+            ],
+        )
+
+    def test_offline_worker_is_told_not_to_download(self):
+        child = self.launched(FakeProcess(), offline=True)
+        self.assertEqual(child.environments[0].get("HF_HUB_OFFLINE"), "1")
+
+    def test_online_worker_may_download(self):
+        child = self.launched(FakeProcess(), offline=False)
+        self.assertNotIn("HF_HUB_OFFLINE", child.environments[0])
+
+    def test_token_is_handed_to_the_worker(self):
+        child = self.launched(FakeProcess(), token="hf_entered")
+        self.assertEqual(child.environments[0].get("HF_TOKEN"), "hf_entered")
+
+    def test_token_in_relayed_progress_is_redacted(self):
+        messages = []
+        output = b"Loading model with plain-secret\n"
+        self.launched(FakeProcess(output), token="plain-secret", status=messages.append)
+        self.assertEqual(messages, [f"Loading model with {REDACTED}"])
+
+    def test_failure_detail_ends_with_the_last_output_lines(self):
+        lines = [f"line {i}" for i in range(FAILURE_DETAIL_LINES + 2)]
+        message = self.failure("\n".join(lines).encode())
+        expected_tail = "\n".join(lines[-FAILURE_DETAIL_LINES:])
+        self.assertTrue(message.endswith(f"Technical details:\n{expected_tail}"))
+
+    def test_undecodable_output_is_relayed_with_replacement_characters(self):
+        messages = []
+        self.launched(FakeProcess(b"Loading \xff model\n"), status=messages.append)
+        self.assertEqual(messages, ["Loading � model"])
+
+    def test_output_is_read_as_utf8_where_the_platform_default_is_not(self):
+        messages = []
+        with patch("subprocess._text_encoding", return_value="cp1252"):
+            output = "Loading Grüße\n".encode()
+            self.launched(FakeProcess(output), status=messages.append)
+        self.assertEqual(messages, ["Loading Grüße"])
+
+    def test_cancelled_worker_ignoring_termination_is_killed_after_a_grace_period(
+        self,
+    ):
+        def cancel(_message):
+            raise KeyboardInterrupt
+
+        child = FakeProcess(b"Loading\n", ignores_termination=True)
+        with self.assertRaises(KeyboardInterrupt):
+            self.launched(child, status=cancel)
+        self.assertEqual(
+            (child.terminated, child.waits[0], child.killed),
+            (True, TERMINATION_GRACE_SECONDS, True),
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecodeFailureTests(unittest.TestCase):
+    def test_unreadable_audio_gets_its_own_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "notes.wav"
+            fake.write_text("This is not audio.")
+            with self.assertRaises(RuntimeError) as raised:
+                worker(
+                    "decode", fake, Path(directory) / "decoded.wav", silent, None, False
+                )
+        message = str(raised.exception)
+        names_audio_cause_without_login_advice = (
+            "could not be read as audio" in message,
+            "401/403" in message,
+        )
+        self.assertEqual(names_audio_cause_without_login_advice, (True, False))
