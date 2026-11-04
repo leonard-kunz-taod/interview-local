@@ -35,7 +35,6 @@ def stereo_recording(path):
 
 
 def video_only_recording(path):
-    """A short MP4 holding one video stream and no audio stream."""
     with av.open(str(path), "w") as container:
         stream = container.add_stream("mpeg4", rate=10)
         stream.width, stream.height, stream.pix_fmt = 32, 32, "yuv420p"

@@ -9,12 +9,7 @@ _HF_TOKEN_PATTERN = re.compile(r"hf_[A-Za-z0-9]+")
 def redacted(text: str, token: str | None) -> str:
     """Text with the exact token and anything shaped like a Hub token replaced.
 
-    Args:
-        text: Output or an error message that may contain a token.
-        token: The token in use; None or empty when there is none.
-
-    Returns:
-        The text with every token occurrence replaced by REDACTED.
+    An empty token is treated like None: only the token-shaped pattern applies.
     """
     if token:
         text = text.replace(token, REDACTED)
