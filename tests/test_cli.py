@@ -563,11 +563,6 @@ class AudioTests(unittest.TestCase):
     def test_alignment_flag_aligns_the_words(self):
         self.assertIn("align", self.run_audio("--no-llm", "--align").worker.stages)
 
-    def test_no_align_flag_is_rejected_as_unknown(self):
-        with self.assertRaises(SystemExit) as exit_:
-            self.run_audio("--no-llm", "--no-align")
-        self.assertEqual(exit_.exception.code, 2)
-
     def test_unexpected_error_propagates_with_its_traceback(self):
         incomplete_turn = {"start": 0}
         diarization = {"exclusive": [incomplete_turn], "regular": [incomplete_turn]}

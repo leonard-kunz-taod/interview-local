@@ -253,7 +253,7 @@ def _metadata(source: Path, words: list[Word], alignment: bool, detected: int) -
     }
 
 
-def _worker_environment(token: str | None, offline: bool) -> dict:
+def _worker_environment(token: str | None, offline: bool) -> dict[str, str]:
     env = os.environ.copy()
     if token:
         env["HF_TOKEN"] = token

@@ -1,12 +1,18 @@
 """Each stage runs in a separate process so its model memory is released on exit."""
 
+from __future__ import annotations
+
 import json
 import os
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .redaction import redacted
+
+if TYPE_CHECKING:
+    from av.container import InputContainer
 
 # The libraries read these when imported, so they must be set first.
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
@@ -76,12 +82,12 @@ def decode(source: Path, target: Path) -> None:
         raise ValueError("The audio track contains no samples.")
 
 
-def _require_audio_track(container) -> None:
+def _require_audio_track(container: InputContainer) -> None:
     if not container.streams.audio:
         raise ValueError("The file contains no audio track.")
 
 
-def _write_mono_pcm(container, target: Path) -> int:
+def _write_mono_pcm(container: InputContainer, target: Path) -> int:
     """Write the first audio track to target; return the number of samples."""
     import av
     import soundfile as sf

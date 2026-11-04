@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -92,7 +93,7 @@ def launch():
         for button in controls:
             button.config(state=state)
 
-    def submit(function):
+    def submit(function: Callable[[], object]) -> None:
         nonlocal running
         if running:
             return
@@ -212,7 +213,7 @@ def launch():
                 finish_job(kind, payload)
         root.after(150, poll)
 
-    def finish_job(kind, payload):
+    def finish_job(kind: str, payload: str | None) -> None:
         nonlocal running
         # pragma: no mutate start -- only the truthiness of running is read
         running = False
