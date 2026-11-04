@@ -8,10 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from support.fake_process import FakeProcess
-from support.fake_worker import OUTPUTS, TURNS, WORDS, FakeWorker
+from support.fake_worker import OUTPUTS, WORDS, FakeWorker
 from support.platform_encoding import windows_default_encoding
 from support.platform_files import case_sensitive_file_names
 
+from interview_local import redaction
 from interview_local.models import DIARIZATION_ID, WHISPER_MODEL
 from interview_local.pipeline import (
     FAILURE_DETAIL_LINES,
@@ -19,10 +20,9 @@ from interview_local.pipeline import (
     WORKSPACE_PREFIX,
     prepare,
     process,
+    run_worker_stage,
     transcribe,
-    worker,
 )
-from interview_local.worker import REDACTED
 
 RAW = {"segments": [{"start": 0, "end": 1, "text": "Original", "words": []}]}
 TERMINATION_GRACE_SECONDS = 10
@@ -44,7 +44,7 @@ class ProcessTests(unittest.TestCase):
             audio = Path(directory) / "test.m4a"
             audio.touch()
             output = Path(directory) / "output"
-            with patch("interview_local.pipeline.worker", worker):
+            with patch("interview_local.pipeline.run_worker_stage", worker):
                 result = process(audio, status, None, offline, alignment, output)
         return worker, result
 
@@ -127,7 +127,9 @@ class ProcessTests(unittest.TestCase):
             audio = Path(directory) / "test.wav"
             audio.touch()
             output = Path(directory) / "output"
-            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+            with patch(
+                "interview_local.pipeline.run_worker_stage", FakeWorker(OUTPUTS)
+            ):
                 process(audio, messages.append, None, False, True, output)
             saved_raw = output / "01_raw.txt"
         steps = [m for m in messages if m in STEPS.values() or str(saved_raw) in m]
@@ -173,11 +175,6 @@ class ProcessTests(unittest.TestCase):
         words = [(w["text"], w["timing"]) for w in result["words"]]
         self.assertEqual(words, [("Hallo Welt", "estimated")])
 
-    def test_legacy_exclusive_turns_disable_overlap_detection(self):
-        outputs = dict(OUTPUTS, diarize=TURNS)
-        _, result = self.run_process(outputs, alignment=True)
-        self.assertFalse(result["overlap_detection_available"])
-
     def test_regular_turns_enable_overlap_detection(self):
         _, result = self.run_process(OUTPUTS, alignment=True)
         self.assertTrue(result["overlap_detection_available"])
@@ -187,7 +184,9 @@ class ProcessTests(unittest.TestCase):
             audio = Path(directory) / "test.wav"
             audio.touch()
             output = Path(directory) / "output"
-            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+            with patch(
+                "interview_local.pipeline.run_worker_stage", FakeWorker(OUTPUTS)
+            ):
                 processed(audio, output, alignment=True)
             saved = sorted(os.listdir(output))
         self.assertEqual(
@@ -210,7 +209,9 @@ class ProcessTests(unittest.TestCase):
             audio = Path(directory) / "test.wav"
             audio.touch()
             output = Path(directory) / "interviews" / "first"
-            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+            with patch(
+                "interview_local.pipeline.run_worker_stage", FakeWorker(OUTPUTS)
+            ):
                 processed(audio, output)
             saved = sorted(os.listdir(output))
         self.assertEqual(
@@ -224,7 +225,7 @@ class TranscribeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "test.wav"
             audio.touch()
-            with patch("interview_local.pipeline.worker", worker):
+            with patch("interview_local.pipeline.run_worker_stage", worker):
                 raw = transcribe(audio, silent, offline, Path(directory) / "output")
         return worker, raw
 
@@ -251,7 +252,7 @@ class TranscribeTests(unittest.TestCase):
 class PrepareTests(unittest.TestCase):
     def prepared(self, alignment, token=None):
         worker = FakeWorker({})
-        with patch("interview_local.pipeline.worker", worker):
+        with patch("interview_local.pipeline.run_worker_stage", worker):
             prepare(silent, token, alignment)
         return worker
 
@@ -301,7 +302,7 @@ class InputTests(unittest.TestCase):
             audio.touch()
             with (
                 patch(
-                    "interview_local.pipeline.worker",
+                    "interview_local.pipeline.run_worker_stage",
                     side_effect=RuntimeError("Broken"),
                 ),
                 self.assertRaises(RuntimeError),
@@ -322,7 +323,7 @@ class PreservationTests(unittest.TestCase):
         audio = output.parent / "audio.wav"
         audio.touch()
         with (
-            patch("interview_local.pipeline.worker", worker),
+            patch("interview_local.pipeline.run_worker_stage", worker),
             self.assertRaises(RuntimeError),
         ):
             processed(audio, output)
@@ -350,7 +351,9 @@ class WorkerLaunchTests(unittest.TestCase):
             patch.dict(os.environ, clear=True),
             patch("subprocess.Popen", child),
         ):
-            worker("decode", Path("in.wav"), Path("out.wav"), status, token, offline)
+            run_worker_stage(
+                "decode", Path("in.wav"), Path("out.wav"), status, token, offline
+            )
         return child
 
     def failure(self, output):
@@ -378,6 +381,10 @@ class WorkerLaunchTests(unittest.TestCase):
         child = self.launched(FakeProcess(), offline=True)
         self.assertEqual(child.environments[0].get("HF_HUB_OFFLINE"), "1")
 
+    def test_offline_worker_environment_adds_only_the_offline_switch(self):
+        child = self.launched(FakeProcess(), offline=True)
+        self.assertEqual(child.environments[0], {"HF_HUB_OFFLINE": "1"})
+
     def test_online_worker_may_download(self):
         child = self.launched(FakeProcess(), offline=False)
         self.assertNotIn("HF_HUB_OFFLINE", child.environments[0])
@@ -390,7 +397,21 @@ class WorkerLaunchTests(unittest.TestCase):
         messages = []
         output = b"Loading model with plain-secret\n"
         self.launched(FakeProcess(output), token="plain-secret", status=messages.append)
-        self.assertEqual(messages, [f"Loading model with {REDACTED}"])
+        self.assertEqual(messages, [f"Loading model with {redaction.REDACTED}"])
+
+    def test_token_shaped_progress_is_redacted_without_a_known_token(self):
+        messages = []
+        output = b"Loading model with hf_leakedToken123\n"
+        self.launched(FakeProcess(output), status=messages.append)
+        self.assertEqual(messages, [f"Loading model with {redaction.REDACTED}"])
+
+    def test_token_shaped_failure_detail_is_redacted_without_a_known_token(self):
+        message = self.failure(b"401 Client Error for hf_leakedToken123\n")
+        self.assertTrue(
+            message.endswith(
+                f"Technical details:\n401 Client Error for {redaction.REDACTED}"
+            )
+        )
 
     def test_failure_detail_ends_with_the_last_output_lines(self):
         lines = [f"line {i}" for i in range(FAILURE_DETAIL_LINES + 2)]

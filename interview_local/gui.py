@@ -102,11 +102,14 @@ def launch():
         def job():
             try:
                 function()
-                # pragma: no mutate start -- every kind but status and error finishes the job as done
+                # pragma: no mutate start -- every kind but status, error and unexpected finishes the job as done
                 events.put(("done", None))
                 # pragma: no mutate end
-            except Exception as exc:
+            except (ValueError, RuntimeError, OSError) as exc:
                 events.put(("error", str(exc)))
+            except Exception as exc:
+                events.put(("unexpected", type(exc).__name__))
+                raise
 
         threading.Thread(target=job, daemon=True).start()
 
@@ -220,6 +223,11 @@ def launch():
         if kind == "error":
             status.set("Processing failed. Completed stages remain saved.")
             messagebox.showerror("Processing failed", payload)
+        elif kind == "unexpected":
+            status.set(
+                f"Processing failed unexpectedly ({payload}). "
+                "See the terminal for details."
+            )
         else:
             status.set(
                 f"Done. Saved stages: {output}" if output else "Local model prepared."

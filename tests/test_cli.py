@@ -351,7 +351,10 @@ class GuiFlagTests(unittest.TestCase):
 class PrepareTests(unittest.TestCase):
     def test_speech_preparation_loads_every_speech_model(self):
         worker = FakeWorker({})
-        with bundled_local_model(), patch("interview_local.pipeline.worker", worker):
+        with (
+            bundled_local_model(),
+            patch("interview_local.pipeline.run_worker_stage", worker),
+        ):
             code, output = run_cli("--prepare", "--align")
         self.assertEqual(
             (code, worker.stages, output.splitlines()[-1]),
@@ -367,7 +370,7 @@ class PrepareTests(unittest.TestCase):
         with (
             without_local_model(),
             patch.dict(os.environ, {"HF_TOKEN": TOKEN}),
-            patch("interview_local.pipeline.worker", worker),
+            patch("interview_local.pipeline.run_worker_stage", worker),
         ):
             run_cli("--prepare")
         self.assertEqual(worker.tokens, {TOKEN})
@@ -375,7 +378,10 @@ class PrepareTests(unittest.TestCase):
     def test_llm_preparation_downloads_only_the_language_model(self):
         service = FakeOllama(installed=())
         worker = FakeWorker({})
-        with served_by(service), patch("interview_local.pipeline.worker", worker):
+        with (
+            served_by(service),
+            patch("interview_local.pipeline.run_worker_stage", worker),
+        ):
             code, _ = run_cli("--prepare-llm")
         self.assertEqual(
             (code, MODEL in service.installed, worker.stages), (0, True, [])
@@ -391,7 +397,7 @@ class TokenTests(unittest.TestCase):
             audio.touch()
             with (
                 patch.dict(os.environ, environment),
-                patch("interview_local.pipeline.worker", worker),
+                patch("interview_local.pipeline.run_worker_stage", worker),
                 patch("huggingface_hub.get_token", return_value=cached),
                 patch("getpass.getpass", return_value=entered),
             ):
@@ -434,7 +440,7 @@ class TokenTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             without_local_model(),
             patch.dict(os.environ, {"HF_TOKEN": TOKEN}),
-            patch("interview_local.pipeline.worker", worker),
+            patch("interview_local.pipeline.run_worker_stage", worker),
         ):
             audio = Path(directory) / "interview.wav"
             audio.touch()
@@ -450,7 +456,7 @@ class InteractiveAudioTests(unittest.TestCase):
             output = Path(directory) / "run"
             entries = [entered_path(audio), *names]
             with (
-                patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)),
+                patch("interview_local.pipeline.run_worker_stage", FakeWorker(OUTPUTS)),
                 patch("builtins.input", side_effect=entries),
             ):
                 code, printed = run_cli("--offline", "--no-llm", "--output", output)
@@ -497,7 +503,7 @@ class AudioTests(unittest.TestCase):
             audio = Path(directory) / "interview.wav"
             audio.touch()
             output = Path(directory) / "run"
-            with patch("interview_local.pipeline.worker", worker):
+            with patch("interview_local.pipeline.run_worker_stage", worker):
                 code, printed = run_cli(
                     audio, "--offline", "--output", output, *options
                 )
@@ -530,7 +536,7 @@ class AudioTests(unittest.TestCase):
             audio.touch()
             with (
                 served_by(FakeOllama(reachable=False)),
-                patch("interview_local.pipeline.worker", worker),
+                patch("interview_local.pipeline.run_worker_stage", worker),
             ):
                 code, _ = run_cli(audio, "--offline", "--output", Path(directory) / "o")
         self.assertEqual((code, worker.stages), (1, []))
@@ -557,9 +563,16 @@ class AudioTests(unittest.TestCase):
     def test_alignment_flag_aligns_the_words(self):
         self.assertIn("align", self.run_audio("--no-llm", "--align").worker.stages)
 
-    def test_no_align_flag_runs_without_alignment(self):
-        run = self.run_audio("--no-llm", "--no-align")
-        self.assertEqual((run.code, "align" in run.worker.stages), (0, False))
+    def test_no_align_flag_is_rejected_as_unknown(self):
+        with self.assertRaises(SystemExit) as exit_:
+            self.run_audio("--no-llm", "--no-align")
+        self.assertEqual(exit_.exception.code, 2)
+
+    def test_unexpected_error_propagates_with_its_traceback(self):
+        incomplete_turn = {"start": 0}
+        diarization = {"exclusive": [incomplete_turn], "regular": [incomplete_turn]}
+        with self.assertRaisesRegex(TypeError, "missing 2 required"):
+            self.run_audio("--no-llm", outputs=dict(OUTPUTS, diarize=diarization))
 
     def test_run_records_that_alignment_was_not_used(self):
         metadata = self.run_audio("--no-llm").speakers["metadata"]
@@ -616,14 +629,16 @@ class OutputDirectoryTests(unittest.TestCase):
     def run_into(self, directory, output):
         audio = Path(directory) / "interview.wav"
         audio.touch()
-        with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+        with patch("interview_local.pipeline.run_worker_stage", FakeWorker(OUTPUTS)):
             return run_cli(audio, "--offline", "--no-llm", "--output", output)
 
     def test_default_output_is_a_new_timestamped_folder_under_transcripts(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory):
             audio = Path(directory) / "interview.wav"
             audio.touch()
-            with patch("interview_local.pipeline.worker", FakeWorker(OUTPUTS)):
+            with patch(
+                "interview_local.pipeline.run_worker_stage", FakeWorker(OUTPUTS)
+            ):
                 run_cli(audio, "--offline", "--no-llm")
             runs = os.listdir(Path(directory) / "transcripts")
             created = sorted(os.listdir(directory))

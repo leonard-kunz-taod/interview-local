@@ -15,6 +15,7 @@ from pathlib import Path
 from .artifacts import save_raw, save_speakers
 from .core import Turn, Word, merge, segment_words
 from .models import DIARIZATION_ID, WHISPER_MODEL
+from .redaction import redacted
 
 STEPS = {
     "decode": "1/5 Decode audio (WAV, MP3 or M4A)",
@@ -107,11 +108,11 @@ def prepare(status: Callable[[str], None], token: str | None, alignment: bool) -
     for stage in stages:
         status(f"Model download / loading check: {stage}")
         # pragma: no mutate start -- preparation stages read neither their source nor their target
-        worker(stage, Path("."), Path("."), status, token, offline=False)
+        run_worker_stage(stage, Path("."), Path("."), status, token, offline=False)
         # pragma: no mutate end
 
 
-def worker(
+def run_worker_stage(
     stage: str,
     source: Path,
     target: Path,
@@ -170,7 +171,7 @@ class _Run:
         return self.work / "original.wav"
 
     def stage(self, stage: str, source: Path, target: Path) -> None:
-        worker(stage, source, target, self.status, self.token, self.offline)
+        run_worker_stage(stage, source, target, self.status, self.token, self.offline)
 
 
 def _checked_audio(source: Path) -> Path:
@@ -220,14 +221,11 @@ def _whisper_words(raw: dict, run: _Run) -> list[Word]:
     return [Word(**w) for s in raw["segments"] for w in segment_words(s, "whisper")]
 
 
-def _diarization(run: _Run) -> tuple[list[Turn], list[Turn] | None]:
+def _diarization(run: _Run) -> tuple[list[Turn], list[Turn]]:
     """Exclusive turns for assignment and regular turns for overlap detection."""
     run.status(STEPS["diarize"])
     run.stage("diarize", run.audio, run.work / "turns.json")
     diarization = _read_json(run.work / "turns.json")
-    # Legacy fixtures and earlier cached outputs contain exclusive turns only.
-    if isinstance(diarization, list):
-        return _turns(diarization), None
     return _turns(diarization["exclusive"]), _turns(diarization["regular"])
 
 
@@ -259,17 +257,8 @@ def _worker_environment(token: str | None, offline: bool) -> dict:
     env = os.environ.copy()
     if token:
         env["HF_TOKEN"] = token
-    # pragma: no mutate start -- the worker module sets this itself before importing any library
-    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    # pragma: no mutate end
-    # pragma: no mutate start -- the worker module sets this itself before importing any library
-    env["PYANNOTE_METRICS_ENABLED"] = "0"
-    # pragma: no mutate end
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
-        # pragma: no mutate start -- huggingface_hub, which every model library here downloads through, already reads HF_HUB_OFFLINE set above
-        env["TRANSFORMERS_OFFLINE"] = "1"
-        # pragma: no mutate end
     return env
 
 
@@ -279,9 +268,7 @@ def _relayed_output(
     """Forward progress lines with the token redacted; return the last lines."""
     tail = []
     for line in lines:
-        line = line.strip()
-        if secret:
-            line = line.replace(secret, "[Token redacted]")
+        line = redacted(line.strip(), secret)
         tail = [*tail, line][-FAILURE_DETAIL_LINES:]
         if line.startswith(FORWARDED_OUTPUT):
             status(line)
