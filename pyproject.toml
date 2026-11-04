@@ -12,6 +12,10 @@ interview-local = "interview_local.cli:main"
 [tool.setuptools.packages.find]
 include = ["interview_local*"]
 
+[tool.ruff]
+# Untracked agent worktrees of other branches live here.
+extend-exclude = [".claude"]
+
 [tool.mutmut]
 source_paths = ["interview_local/"]
 pytest_add_cli_args_test_selection = ["tests/"]

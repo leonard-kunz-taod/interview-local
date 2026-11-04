@@ -24,7 +24,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 130
-    except Exception as exc:
+    # Last boundary before the terminal: any failure becomes one message and exit code 1.
+    except Exception as exc:  # noqa: BLE001
         print(
             f"Error: {exc}\nCompleted earlier stages remain on disk, if any.",
             file=sys.stderr,
