@@ -27,7 +27,8 @@ def main() -> None:
         elapsed = time.monotonic() - started
         print(f"Stage {sys.argv[1]} completed in {elapsed:.1f} s", flush=True)
         _report_peak_memory()
-    except Exception as exc:
+    # Every failure must leave through _redacted: a raw traceback could print an HF token.
+    except Exception as exc:  # noqa: BLE001
         message = _redacted(str(exc))
         print(f"ERROR ({type(exc).__name__}): {message}", file=sys.stderr, flush=True)
         sys.exit(1)

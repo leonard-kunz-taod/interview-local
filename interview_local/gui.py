@@ -105,7 +105,8 @@ def launch():
                 # pragma: no mutate start -- every kind but status and error finishes the job as done
                 events.put(("done", None))
                 # pragma: no mutate end
-            except Exception as exc:
+            # A failure must reach the window; an uncaught one would end the thread silently.
+            except Exception as exc:  # noqa: BLE001
                 events.put(("error", str(exc)))
 
         threading.Thread(target=job, daemon=True).start()
