@@ -3,7 +3,7 @@
 import re
 
 REDACTED = "[Token redacted]"
-HF_TOKEN_PATTERN = re.compile(r"hf_[A-Za-z0-9]+")
+_HF_TOKEN_PATTERN = re.compile(r"hf_[A-Za-z0-9]+")
 
 
 def redacted(text: str, token: str | None) -> str:
@@ -18,4 +18,4 @@ def redacted(text: str, token: str | None) -> str:
     """
     if token:
         text = text.replace(token, REDACTED)
-    return HF_TOKEN_PATTERN.sub(REDACTED, text)
+    return _HF_TOKEN_PATTERN.sub(REDACTED, text)

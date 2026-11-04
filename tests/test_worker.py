@@ -223,11 +223,17 @@ class StageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^The audio track contains no samples"):
             run("decode", self.source, self.directory / "decoded.wav")
 
-    def test_file_without_an_audio_track_is_rejected_before_writing(self):
+    def test_file_without_an_audio_track_is_rejected(self):
+        video = self.directory / "video.mp4"
+        video_only_recording(video)
+        with self.assertRaisesRegex(ValueError, "^The file contains no audio track"):
+            run("decode", video, self.directory / "decoded.wav")
+
+    def test_file_without_an_audio_track_leaves_no_decoded_file(self):
         video = self.directory / "video.mp4"
         video_only_recording(video)
         decoded = self.directory / "decoded.wav"
-        with self.assertRaisesRegex(ValueError, "^The file contains no audio track"):
+        with self.assertRaises(ValueError):
             run("decode", video, decoded)
         self.assertFalse(decoded.exists())
 

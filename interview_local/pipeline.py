@@ -263,12 +263,12 @@ def _worker_environment(token: str | None, offline: bool) -> dict:
 
 
 def _relayed_output(
-    lines, status: Callable[[str], None], secret: str | None
+    lines, status: Callable[[str], None], token: str | None
 ) -> list[str]:
     """Forward progress lines with the token redacted; return the last lines."""
     tail = []
     for line in lines:
-        line = redacted(line.strip(), secret)
+        line = redacted(line.strip(), token)
         tail = [*tail, line][-FAILURE_DETAIL_LINES:]
         if line.startswith(FORWARDED_OUTPUT):
             status(line)

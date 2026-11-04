@@ -207,16 +207,21 @@ class ProcessingTests(WindowTestCase):
             delivered.wait(SETTLE_SECONDS)
         return received
 
-    def test_unexpected_failure_frees_the_window_and_points_to_the_terminal(self):
+    def test_unexpected_failure_points_to_the_terminal(self):
+        self.process_audio_failing_unexpectedly()
+        self.assertEqual(
+            self.screen.status(),
+            "Processing failed unexpectedly (TypeError). See the terminal for details.",
+        )
+
+    def test_unexpected_failure_enables_the_controls_again(self):
+        self.process_audio_failing_unexpectedly()
+        self.assertFalse(self.screen.busy())
+
+    def test_token_is_cleared_after_an_unexpected_failure(self):
         self.screen.entries()[1].set("hf_entered")
         self.process_audio_failing_unexpectedly()
-        expected_status = (
-            "Processing failed unexpectedly (TypeError). See the terminal for details."
-        )
-        self.assertEqual(
-            (self.screen.status(), self.screen.busy(), self.screen.entries()[1].get()),
-            (expected_status, False, ""),
-        )
+        self.assertEqual(self.screen.entries()[1].get(), "")
 
     def test_unexpected_failure_reaches_the_thread_exception_hook(self):
         received = self.process_audio_failing_unexpectedly()
