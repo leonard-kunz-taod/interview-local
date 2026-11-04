@@ -35,8 +35,20 @@ SEGMENT = {
     "end": 2.0,
     "text": "Test 42",
     "words": [
-        {"start": 1.0, "end": 1.3, "text": "Test", "timing": "whisper"},
-        {"start": 1.3, "end": 2.0, "text": "42", "timing": "whisper"},
+        {
+            "start": 1.0,
+            "end": 1.3,
+            "text": "Test",
+            "timing": "whisper",
+            "probability": 0.9,
+        },
+        {
+            "start": 1.3,
+            "end": 2.0,
+            "text": "42",
+            "timing": "whisper",
+            "probability": 0.9,
+        },
     ],
 }
 
@@ -292,7 +304,7 @@ class TranscriptionTests(unittest.TestCase):
         )
 
     def test_segments_keep_their_whisper_word_timestamps(self):
-        word = SimpleNamespace(start=0.0, end=0.5, word=" Hallo")
+        word = SimpleNamespace(start=0.0, end=0.5, word=" Hallo", probability=0.75)
         result, _ = recognized([whisper_segment(0.5, [word])])
         self.assertEqual(
             result,
@@ -308,6 +320,7 @@ class TranscriptionTests(unittest.TestCase):
                                 "end": 0.5,
                                 "text": " Hallo",
                                 "timing": "whisper",
+                                "probability": 0.75,
                             }
                         ],
                     }
@@ -465,6 +478,13 @@ class AlignmentTests(unittest.TestCase):
         self.assertEqual(
             [(w["start"], w["end"], w["timing"]) for w in result],
             [(1.0, 1.3, "aligned"), (1.0, 2.0, "estimated")],
+        )
+
+    def test_aligned_and_estimated_words_carry_no_whisper_probability(self):
+        result = aligned([{"word": "Test", "start": 0.0, "end": 0.3}, {"word": "42"}])
+        self.assertEqual(
+            [(w["timing"], w["probability"]) for w in result],
+            [("aligned", None), ("estimated", None)],
         )
 
     def test_aligned_word_with_only_a_start_time_is_estimated(self):

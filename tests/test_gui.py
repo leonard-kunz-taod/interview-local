@@ -241,7 +241,7 @@ class ProcessingTests(WindowTestCase):
 
 class ComparisonTests(WindowTestCase):
     def saved_draft(self, word="Hallo"):
-        speakers = merge([Word(0, 0.5, word)], [Turn(0, 1, "s")], [])
+        speakers = merge([Word(0, 0.5, word, 0.9, "whisper")], [Turn(0, 1, "s")], [])
         draft = enhance(speakers, lambda _: None)
         path = self.directory / "03_readable.json"
         path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")

@@ -11,6 +11,8 @@ dependencies = ["onnxruntime>=1.20,<2", "psutil>=6,<8", "av>=14,<19", "soundfile
 interview-local = "interview_local.cli:main"
 [tool.setuptools.packages.find]
 include = ["interview_local*"]
+[tool.setuptools.package-data]
+"interview_local.web" = ["static/*"]
 
 [tool.ruff]
 # Untracked agent worktrees of other branches live here.
@@ -37,7 +39,11 @@ do_not_mutate_patterns = [
     'input\(f?"',
     '^\s*prompt = f?"',
     'getpass\.getpass\(',
-    # Exception messages written on the raise line.
+    # Exception messages written on the raise line, including HTTP errors.
+    'raise \w+\(HTTPStatus\.\w+,\s*f?"',
+    'return \w*Error\(f?"',
+    # HTTP field names are case-insensitive (RFC 9110 5.1).
+    '(send_header|headers\.get)\("[A-Z][A-Za-z-]*"',
     'raise \w+\(f?"[^"]*"\)\s*$',
     # Console notices and when they are flushed.
     '^\s*print\(f?"',

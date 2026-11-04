@@ -2,7 +2,9 @@
 
 import json
 
-WORDS = [{"start": 0, "end": 1, "text": "Hallo", "timing": "aligned"}]
+WORDS = [
+    {"start": 0, "end": 1, "text": "Hallo", "timing": "aligned", "probability": None}
+]
 TURNS = [{"start": 0, "end": 1, "speaker": "s0"}]
 DIARIZATION = {"exclusive": TURNS, "regular": TURNS}
 OUTPUTS = {"asr": {"segments": []}, "align": WORDS, "diarize": DIARIZATION}
@@ -10,7 +12,9 @@ SPOKEN_SEGMENT = {
     "start": 0,
     "end": 1,
     "text": " Grüße",
-    "words": [{"start": 0, "end": 1, "text": "Grüße", "timing": "whisper"}],
+    "words": [
+        {"start": 0, "end": 1, "text": "Grüße", "timing": "whisper", "probability": 0.9}
+    ],
 }
 SPOKEN_OUTPUTS = dict(OUTPUTS, asr={"segments": [SPOKEN_SEGMENT]})
 STAGES_READING_THEIR_SOURCE = {"decode", "asr", "align", "diarize"}

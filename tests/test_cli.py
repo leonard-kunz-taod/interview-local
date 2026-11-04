@@ -67,7 +67,12 @@ def saved_json(path):
 
 def speaker_transcript():
     return merge(
-        [Word(0, 0.3, "Hallo"), Word(0.3, 0.7, "zusammen.")], [Turn(0, 1, "s")], []
+        [
+            Word(0, 0.3, "Hallo", 0.9, "whisper"),
+            Word(0.3, 0.7, "zusammen.", 0.9, "whisper"),
+        ],
+        [Turn(0, 1, "s")],
+        [],
     )
 
 
@@ -95,6 +100,46 @@ class ArgumentTests(unittest.TestCase):
     def test_offline_preparation_is_rejected(self):
         code, _ = run_cli("--prepare", "--offline")
         self.assertEqual(code, 1)
+
+
+class StoppedServer:
+    """A web server stand-in that needs no port and is stopped by Ctrl+C at once."""
+
+    server_address = ("127.0.0.1", 8765)
+
+    def __init__(self, runs_root):
+        self.runs_root = runs_root
+
+    def serve_forever(self):
+        raise KeyboardInterrupt
+
+    def server_close(self):
+        pass
+
+
+class WebOptionTests(unittest.TestCase):
+    def test_web_ui_serves_the_resolved_runs_directory(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("interview_local.web.server.EditorServer", StoppedServer),
+            patch("interview_local.web.server.webbrowser.open"),
+        ):
+            runs = Path(directory) / "runs"
+            code, printed = run_cli("--web", "--runs-dir", runs)
+            self.assertEqual(
+                (code, f"Runs are saved in {runs.resolve()}" in printed), (0, True)
+            )
+
+    def test_web_ui_serves_transcripts_in_the_working_directory_by_default(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("interview_local.web.server.EditorServer", StoppedServer),
+            patch("interview_local.web.server.webbrowser.open"),
+            contextlib.chdir(directory),
+        ):
+            _, printed = run_cli("--web")
+            expected = Path(directory, "transcripts").resolve()
+            self.assertIn(f"Runs are saved in {expected}", printed)
 
 
 class RenameTests(unittest.TestCase):
@@ -161,7 +206,9 @@ class RenameTests(unittest.TestCase):
         )
 
     def test_german_transcript_is_read_where_the_platform_default_is_not_utf8(self):
-        transcript = merge([Word(0, 0.5, "Grüße")], [Turn(0, 1, "s")], [])
+        transcript = merge(
+            [Word(0, 0.5, "Grüße", 0.9, "whisper")], [Turn(0, 1, "s")], []
+        )
         with windows_default_encoding():
             _, _, saved = self.renamed(transcript, ["", ""])
         self.assertEqual(saved["words"][0]["text"], "Grüße")

@@ -41,6 +41,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, help="New, empty output directory")
     parser.add_argument("--gui", action="store_true", help="Optional native Tk window")
     parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Local browser UI on 127.0.0.1 with transcript editor",
+    )
+    parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=Path("transcripts"),
+        help="Parent directory of web UI runs (default: transcripts/)",
+    )
+    parser.add_argument(
         "--doctor",
         action="store_true",
         help="Check hardware and the local model service",
@@ -94,6 +105,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.web:
+        return _serve_web(args.runs_dir)
     _reject_audio_with_saved_stage(args)
     _reject_offline_preparation(args)
     if args.doctor:
@@ -108,6 +121,13 @@ def _run(args: argparse.Namespace) -> int:
             launch()
             return 0
     return _run_terminal_mode(args)
+
+
+def _serve_web(runs_dir: Path) -> int:
+    from .web.server import serve
+
+    serve(runs_dir.expanduser().resolve())
+    return 0
 
 
 def _reject_audio_with_saved_stage(args: argparse.Namespace) -> None:
