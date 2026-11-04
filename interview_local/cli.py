@@ -24,8 +24,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 130
-    # Last boundary before the terminal: any failure becomes one message and exit code 1.
-    except Exception as exc:  # noqa: BLE001
+    except (ValueError, RuntimeError, OSError) as exc:
         print(
             f"Error: {exc}\nCompleted earlier stages remain on disk, if any.",
             file=sys.stderr,
@@ -68,17 +67,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--offline", action="store_true", help="No model downloads; use local caches"
     )
-    alignment = parser.add_mutually_exclusive_group()
-    alignment.add_argument(
+    parser.add_argument(
         "--align",
         dest="alignment",
         action="store_true",
         help="Optional German WhisperX alignment",
     )
-    # pragma: no mutate start -- alignment already defaults to False, so storing False under any name changes nothing
-    alignment.add_argument("--no-align", dest="alignment", action="store_false")
-    # pragma: no mutate end
-    parser.set_defaults(alignment=False)
     parser.add_argument("--name-a", default="Speaker A")
     parser.add_argument("--name-b", default="Speaker B")
     modes = parser.add_mutually_exclusive_group()

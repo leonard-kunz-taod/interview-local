@@ -138,7 +138,7 @@ Only runs started from the web UI can be opened in the editor: older runs have n
 .venv/bin/python -m interview_local --gui
 ```
 
-The window provides audio selection, names for a new run, model preparation, a separate review action and Raw/Speakers/Readable/Review tabs. Stages are saved automatically into a newly created run directory chosen at start. Tk is optional; without it the app falls back to the terminal. The development Python lacked `_tkinter`, so the window and its setup remain untested. Python 3.12 from python.org can be used to create a Tk-capable environment with `uv sync --frozen --python /full/path/to/python3.12`.
+The window provides audio selection, names for a new run, model preparation, a separate review action and Raw/Speakers/Readable/Review tabs. Stages are saved automatically into a newly created run directory chosen at start. Tk is optional; without it the app falls back to the terminal. The window logic is tested against an in-memory Tk stand-in (`tests/support/fake_tk.py`); real Tk widgets and the Tk setup are not exercised by the tests. Python 3.12 from python.org can be used to create a Tk-capable environment with `uv sync --frozen --python /full/path/to/python3.12`.
 
 ## Troubleshooting
 
@@ -155,7 +155,7 @@ The window provides audio selection, names for a new run, model preparation, a s
 
 ## Architecture, tests and GitHub
 
-`core.py` contains model-independent assignment, overlap detection and export. `backends.py` adapts Whisper/pyannote/WhisperX; `worker.py` isolates speech models; `pipeline.py` persists completed stages. `llm.py` implements bounded local editing, source validation and comparison review. `artifacts.py` writes human-readable and audit outputs. Future Parakeet/Nemotron adapters can implement the same `Transcriber`/`Diarizer` protocols. LLM behavior can be replaced behind the client interface.
+`core.py` contains model-independent assignment, overlap detection and export. `backends.py` adapts Whisper/pyannote/WhisperX; `worker.py` isolates speech models; `pipeline.py` persists completed stages. `llm.py` implements bounded local editing, source validation and comparison review. `artifacts.py` writes human-readable and audit outputs. Other speech models such as Parakeet/Nemotron would need their own adapters in `backends.py` and worker stages that save the same JSON results. LLM behavior can be replaced behind the client interface.
 
 ```bash
 uv sync --frozen --python 3.12
@@ -165,17 +165,7 @@ uv run --frozen interview-local --help
 
 The public [CALLHOME German sample](https://catalog.ldc.upenn.edu/LDC2026S06) is downloadable separately with `tools/fetch_test_sample.py test_data/callhome`. It is not bundled in either app ZIP. Convert its FLAC to WAV with a separately installed FFmpeg if necessary. The scorer uses `--offset 119 --start 0.71 --end 103.22` for this sample only. Reference normalization and historical results are in [TEST_REPORT.md](TEST_REPORT.md) and `benchmark/comparison.json`.
 
-No code has been pushed and no GitHub repository has been created. `.gitignore` excludes `models/`, caches, environments, token files, audio and default transcript outputs. The source-only ZIP contains no model weights. Review staged files before publishing a private repository:
-
-```bash
-git init
-git add .
-git status
-git commit -m "Initial local interview transcription app"
-git branch -M main
-git remote add origin git@github.com:YOUR-ACCOUNT/YOUR-PRIVATE-REPO.git
-git push -u origin main
-```
+The source lives in the private repository [leonard-kunz-taod/interview-local](https://github.com/leonard-kunz-taod/interview-local). `.gitignore` excludes `models/`, caches, environments, token files, audio and default transcript outputs. The source-only ZIP contains no model weights.
 
 ## Sources and licenses
 

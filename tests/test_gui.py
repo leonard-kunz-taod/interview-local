@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from support.fake_ollama import FakeOllama, served_by
-from support.fake_tk import FakeScreen
+from support.fake_tk import SETTLE_SECONDS, FakeScreen
 from support.fake_worker import SPOKEN_OUTPUTS, FakeWorker
 from support.platform_encoding import windows_default_encoding
 
@@ -40,7 +40,9 @@ class WindowTestCase(unittest.TestCase):
         self.gui = importlib.import_module("interview_local.gui")
         self.service = stack.enter_context(served_by(self.local_service()))
         self.worker = FakeWorker(SPOKEN_OUTPUTS)
-        stack.enter_context(patch("interview_local.pipeline.worker", self.worker))
+        stack.enter_context(
+            patch("interview_local.pipeline.run_worker_stage", self.worker)
+        )
         self.directory = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.audio = self.directory / "interview.wav"
         self.audio.touch()
@@ -173,7 +175,8 @@ class ProcessingTests(WindowTestCase):
 
     def test_failed_processing_is_reported(self):
         with patch(
-            "interview_local.pipeline.worker", side_effect=RuntimeError("Broken")
+            "interview_local.pipeline.run_worker_stage",
+            side_effect=RuntimeError("Broken"),
         ):
             self.process_audio()
         self.assertEqual(
@@ -183,6 +186,46 @@ class ProcessingTests(WindowTestCase):
                 [("error", "Processing failed", "Broken")],
             ),
         )
+
+    def process_audio_failing_unexpectedly(self):
+        """Process with a bug in the speech stage; return what the thread hook got."""
+        received = []
+        delivered = threading.Event()
+
+        def hook(args):
+            received.append((args.exc_type, str(args.exc_value)))
+            delivered.set()
+
+        with (
+            patch("threading.excepthook", hook),
+            patch(
+                "interview_local.pipeline.run_worker_stage",
+                side_effect=TypeError("a bug"),
+            ),
+        ):
+            self.process_audio()
+            delivered.wait(SETTLE_SECONDS)
+        return received
+
+    def test_unexpected_failure_points_to_the_terminal(self):
+        self.process_audio_failing_unexpectedly()
+        self.assertEqual(
+            self.screen.status(),
+            "Processing failed unexpectedly (TypeError). See the terminal for details.",
+        )
+
+    def test_unexpected_failure_enables_the_controls_again(self):
+        self.process_audio_failing_unexpectedly()
+        self.assertFalse(self.screen.busy())
+
+    def test_token_is_cleared_after_an_unexpected_failure(self):
+        self.screen.entries()[1].set("hf_entered")
+        self.process_audio_failing_unexpectedly()
+        self.assertEqual(self.screen.entries()[1].get(), "")
+
+    def test_unexpected_failure_reaches_the_thread_exception_hook(self):
+        received = self.process_audio_failing_unexpectedly()
+        self.assertEqual(received, [(TypeError, "a bug")])
 
     def test_second_run_starts_once_the_first_has_finished(self):
         self.process_audio()

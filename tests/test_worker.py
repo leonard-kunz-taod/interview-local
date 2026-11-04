@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import av
 import numpy as np
 import soundfile as sf
 from support.model_folders import without_local_model
@@ -19,8 +20,8 @@ from support.platform_files import case_sensitive_file_names
 
 from interview_local.core import DiarizationResult, Turn
 from interview_local.models import DIARIZATION_ID
-from interview_local.pipeline import worker
-from interview_local.worker import SAMPLE_RATE, main, run
+from interview_local.pipeline import run_worker_stage
+from interview_local.worker import SAMPLE_RATE, STAGES, main, run
 
 TOKEN = "hf_secretToken123"
 GRANTED_TOKEN = "hf_granted"
@@ -33,8 +34,26 @@ def stereo_recording(path):
     sf.write(path, np.zeros((8000, 2)), 8000)
 
 
+def video_only_recording(path):
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("mpeg4", rate=10)
+        stream.width, stream.height, stream.pix_fmt = 32, 32, "yuv420p"
+        black = np.zeros((32, 32, 3), np.uint8)
+        for _ in range(3):
+            frame = av.VideoFrame.from_ndarray(black, format="rgb24")
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode(None))
+
+
 def silent(_message):
     pass
+
+
+def raising(error):
+    def stage(source, target):
+        raise error
+
+    return stage
 
 
 class FakeTranscriber:
@@ -98,7 +117,7 @@ class WorkerProcessTests(unittest.TestCase):
             source = Path(directory) / "stereo.wav"
             target = Path(directory) / "decoded.wav"
             stereo_recording(source)
-            worker("decode", source, target, silent, None, False)
+            run_worker_stage("decode", source, target, silent, None, False)
             info = sf.info(target)
         self.assertEqual(
             (info.samplerate, info.channels, info.subtype), (16000, 1, "PCM_16")
@@ -110,7 +129,7 @@ class WorkerProcessTests(unittest.TestCase):
             source = Path(directory) / "stereo.wav"
             stereo_recording(source)
             target = Path(directory) / "out.wav"
-            worker("decode", source, target, messages.append, None, False)
+            run_worker_stage("decode", source, target, messages.append, None, False)
         self.assertTrue(
             any(m.startswith("Stage decode completed in") for m in messages)
         )
@@ -120,13 +139,15 @@ class WorkerProcessTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             self.assertRaisesRegex(RuntimeError, "Unknown processing stage"),
         ):
-            worker("unknown", Path(directory), Path(directory), silent, None, False)
+            run_worker_stage(
+                "unknown", Path(directory), Path(directory), silent, None, False
+            )
 
     def test_token_is_redacted_from_failure_details(self):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / f"{TOKEN}.wav"
             with self.assertRaises(RuntimeError) as failure:
-                worker("decode", missing, missing, silent, TOKEN, False)
+                run_worker_stage("decode", missing, missing, silent, TOKEN, False)
         self.assertNotIn(TOKEN, str(failure.exception))
 
     def test_token_without_the_hub_prefix_is_redacted_from_failure_details(self):
@@ -134,7 +155,7 @@ class WorkerProcessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / f"{secret}.wav"
             with self.assertRaises(RuntimeError) as failure:
-                worker("decode", missing, missing, silent, secret, False)
+                run_worker_stage("decode", missing, missing, silent, secret, False)
         self.assertNotIn(secret, str(failure.exception))
 
     def test_cancelling_during_a_stage_stops_the_worker(self):
@@ -146,7 +167,7 @@ class WorkerProcessTests(unittest.TestCase):
             stereo_recording(source)
             with self.assertRaises(KeyboardInterrupt):
                 target = Path(directory) / "out.wav"
-                worker("decode", source, target, cancel, None, False)
+                run_worker_stage("decode", source, target, cancel, None, False)
 
 
 class StageTests(unittest.TestCase):
@@ -196,10 +217,24 @@ class StageTests(unittest.TestCase):
         expected = np.round(tone * PCM_16_FULL_SCALE)
         self.assertLessEqual(np.abs(samples - expected).max(), 1)
 
-    def test_recording_without_samples_is_rejected(self):
+    def test_audio_track_without_samples_is_rejected(self):
         sf.write(self.source, np.zeros((0, 1)), 8000)
-        with self.assertRaisesRegex(ValueError, "no audio track"):
+        with self.assertRaisesRegex(ValueError, "^The audio track contains no samples"):
             run("decode", self.source, self.directory / "decoded.wav")
+
+    def test_file_without_an_audio_track_is_rejected(self):
+        video = self.directory / "video.mp4"
+        video_only_recording(video)
+        with self.assertRaisesRegex(ValueError, "^The file contains no audio track"):
+            run("decode", video, self.directory / "decoded.wav")
+
+    def test_file_without_an_audio_track_leaves_no_decoded_file(self):
+        video = self.directory / "video.mp4"
+        video_only_recording(video)
+        decoded = self.directory / "decoded.wav"
+        with self.assertRaises(ValueError):
+            run("decode", video, decoded)
+        self.assertFalse(decoded.exists())
 
     def test_speech_recognition_saves_the_transcript(self):
         with patch(
@@ -367,6 +402,26 @@ class MainTests(unittest.TestCase):
         self.assertEqual(
             (code, output), (1, "ERROR (ValueError): Unknown processing stage\n")
         )
+
+    def test_media_library_failure_exits_with_the_error_type_and_message(self):
+        missing_decoder = av.error.DecoderNotFoundError(1, "Decoder not found")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(STAGES, {"decode": raising(missing_decoder)}),
+        ):
+            code, output = self.run_main("decode", directory, directory)
+        self.assertEqual(
+            (code, output),
+            (1, "ERROR (DecoderNotFoundError): [Errno 1] Decoder not found\n"),
+        )
+
+    def test_unexpected_error_propagates_with_its_traceback(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(STAGES, {"decode": raising(TypeError("a bug"))}),
+            self.assertRaisesRegex(TypeError, "a bug"),
+        ):
+            self.run_main("decode", directory, directory)
 
     def test_environment_token_is_redacted_from_the_error(self):
         secret = "plain-secret-value"

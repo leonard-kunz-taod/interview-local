@@ -1,0 +1,16 @@
+"""The one rule for keeping Hugging Face tokens out of relayed and reported text."""
+
+import re
+
+REDACTED = "[Token redacted]"
+_HF_TOKEN_PATTERN = re.compile(r"hf_[A-Za-z0-9]+")
+
+
+def redacted(text: str, token: str | None) -> str:
+    """Text with the exact token and anything shaped like a Hub token replaced.
+
+    An empty token is treated like None: only the token-shaped pattern applies.
+    """
+    if token:
+        text = text.replace(token, REDACTED)
+    return _HF_TOKEN_PATTERN.sub(REDACTED, text)

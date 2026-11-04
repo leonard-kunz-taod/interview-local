@@ -484,7 +484,10 @@ class UploadTests(unittest.TestCase):
         """Upload a recording, let its job run against the speech-model and LLM stand-ins; return
         (upload response, final job status)."""
         with (
-            patch("interview_local.pipeline.worker", speech_models(failing_stage)),
+            patch(
+                "interview_local.pipeline.run_worker_stage",
+                speech_models(failing_stage),
+            ),
             served_by(scripted_ollama([(0, 1, "A", "Guten Tag.")])),
             patch("interview_local.models.local_diarization_model", lambda: None),
             patch.dict(os.environ, {"HF_TOKEN": "hf_test"}),

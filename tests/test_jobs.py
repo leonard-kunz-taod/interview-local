@@ -46,7 +46,7 @@ class TranscriptionJobTests(unittest.TestCase):
     def run_job(self, failing_stage=None, llm=local_llm, models=None):
         with (
             patch(
-                "interview_local.pipeline.worker",
+                "interview_local.pipeline.run_worker_stage",
                 models or speech_models(failing_stage),
             ),
             served_by(llm()),

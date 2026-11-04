@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -92,7 +93,7 @@ def launch():
         for button in controls:
             button.config(state=state)
 
-    def submit(function):
+    def submit(function: Callable[[], object]) -> None:
         nonlocal running
         if running:
             return
@@ -102,12 +103,14 @@ def launch():
         def job():
             try:
                 function()
-                # pragma: no mutate start -- every kind but status and error finishes the job as done
+                # pragma: no mutate start -- every kind but status, error and unexpected finishes the job as done
                 events.put(("done", None))
                 # pragma: no mutate end
-            # A failure must reach the window; an uncaught one would end the thread silently.
-            except Exception as exc:  # noqa: BLE001
+            except (ValueError, RuntimeError, OSError) as exc:
                 events.put(("error", str(exc)))
+            except Exception as exc:
+                events.put(("unexpected", type(exc).__name__))
+                raise
 
         threading.Thread(target=job, daemon=True).start()
 
@@ -210,7 +213,7 @@ def launch():
                 finish_job(kind, payload)
         root.after(150, poll)
 
-    def finish_job(kind, payload):
+    def finish_job(kind: str, payload: str | None) -> None:
         nonlocal running
         # pragma: no mutate start -- only the truthiness of running is read
         running = False
@@ -221,6 +224,11 @@ def launch():
         if kind == "error":
             status.set("Processing failed. Completed stages remain saved.")
             messagebox.showerror("Processing failed", payload)
+        elif kind == "unexpected":
+            status.set(
+                f"Processing failed unexpectedly ({payload}). "
+                "See the terminal for details."
+            )
         else:
             status.set(
                 f"Done. Saved stages: {output}" if output else "Local model prepared."

@@ -1,11 +1,18 @@
 """Each stage runs in a separate process so its model memory is released on exit."""
 
+from __future__ import annotations
+
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .redaction import redacted
+
+if TYPE_CHECKING:
+    from av.container import InputContainer
 
 # The libraries read these when imported, so they must be set first.
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
@@ -15,21 +22,24 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 SAMPLE_RATE = 16000
-REDACTED = "[Token redacted]"
-HF_TOKEN_PATTERN = r"hf_[A-Za-z0-9]+"
 
 
 def main() -> None:
-    """Run the stage named on the command line; report time, memory or the error."""
+    """Run the stage named on the command line; report time, memory or the error.
+
+    Expected failures are reported as one redacted line and exit code 1; any
+    other exception propagates with its traceback.
+    """
+    from av.error import FFmpegError
+
     started = time.monotonic()
     try:
         run(sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]))
         elapsed = time.monotonic() - started
         print(f"Stage {sys.argv[1]} completed in {elapsed:.1f} s", flush=True)
         _report_peak_memory()
-    # Every failure must leave through _redacted: a raw traceback could print an HF token.
-    except Exception as exc:  # noqa: BLE001
-        message = _redacted(str(exc))
+    except (ValueError, RuntimeError, OSError, FFmpegError) as exc:
+        message = redacted(str(exc), os.environ.get("HF_TOKEN"))
         print(f"ERROR ({type(exc).__name__}): {message}", file=sys.stderr, flush=True)
         sys.exit(1)
 
@@ -61,21 +71,36 @@ def decode(source: Path, target: Path) -> None:
     """Decode the first audio track to 16 kHz mono 16-bit PCM WAV.
 
     Raises:
-        ValueError: The file contains no audio samples.
+        ValueError: The file has no audio track, or its track has no samples.
     """
+    import av
+
+    with av.open(str(source)) as container:
+        _require_audio_track(container)
+        samples = _write_mono_pcm(container, target)
+    if not samples:
+        raise ValueError("The audio track contains no samples.")
+
+
+def _require_audio_track(container: InputContainer) -> None:
+    if not container.streams.audio:
+        raise ValueError("The file contains no audio track.")
+
+
+def _write_mono_pcm(container: InputContainer, target: Path) -> int:
+    """Write the first audio track to target; return the number of samples."""
     import av
     import soundfile as sf
 
     samples = 0
     with (
-        av.open(str(source)) as container,
         sf.SoundFile(
             str(target),
             "w",
             samplerate=SAMPLE_RATE,
             channels=1,
             subtype="PCM_16",  # pragma: no mutate -- PCM_16 is soundfile's default WAV subtype, and subtype names are case-insensitive
-        ) as output,
+        ) as output
     ):
         resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
         for array in _resampled(container, resampler):
@@ -83,8 +108,7 @@ def decode(source: Path, target: Path) -> None:
             # pragma: no mutate start -- only whether the count is zero is read, and PyAV never yields an empty chunk
             samples += len(array)
             # pragma: no mutate end
-    if not samples:
-        raise ValueError("The file contains no audio track.")
+    return samples
 
 
 def _resampled(container, resampler):
@@ -163,13 +187,6 @@ def _report_peak_memory() -> None:
         print(f"Peak process RAM (RSS): {rss / divisor:.2f} GiB", flush=True)
     except (ImportError, OSError):
         pass
-
-
-def _redacted(message: str) -> str:
-    token = os.environ.get("HF_TOKEN")
-    if token:
-        message = message.replace(token, REDACTED)
-    return re.sub(HF_TOKEN_PATTERN, REDACTED, message)
 
 
 STAGES = {
