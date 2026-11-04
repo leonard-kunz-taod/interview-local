@@ -237,7 +237,7 @@ def enhance(source: dict, status: Callable[[str], None]) -> dict:
     Returns:
         The stage-3 readable transcript with an embedded, fingerprinted source.
     """
-    words = _source_words(source)
+    words = source_words(source)
     client = OllamaClient()
     identity = client.ready()
     try:
@@ -254,7 +254,7 @@ def enhance(source: dict, status: Callable[[str], None]) -> dict:
         "speakers": deepcopy(source["speakers"]),
         "paragraphs": paragraphs,
         "source_transcript": deepcopy(source),
-        "source_sha256": _fingerprint(source),
+        "source_sha256": fingerprint(source),
         "metadata": dict(
             **identity,
             rejected_chunks=rejected,
@@ -294,7 +294,7 @@ def review(edited: dict, status: Callable[[str], None]) -> dict:
         client.unload()
     result["metadata"]["verification"] = "source_comparison_only_not_audio_verified"
     result["metadata"]["reviewer"] = identity
-    result["metadata"]["reviewed_edit_sha256"] = _fingerprint(edited)
+    result["metadata"]["reviewed_edit_sha256"] = fingerprint(edited)
     return result
 
 
@@ -350,20 +350,20 @@ def _progress_text(update: dict) -> str:
     return update["status"]
 
 
-def _fingerprint(value) -> str:
+def fingerprint(value) -> str:
     canonical = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _tokens(text: str) -> list[str]:
+def tokens(text: str) -> list[str]:
     # pragma: no mutate start -- re.UNICODE is already the default for str patterns
     return re.findall(r"[^\W_]+", text.casefold(), re.UNICODE)
     # pragma: no mutate end
 
 
-def _source_words(source: dict) -> list[dict]:
+def source_words(source: dict) -> list[dict]:
     """Numbered source words, with neutral values for fields of earlier versions."""
     words = deepcopy(source["words"])
     for i, w in enumerate(words):
@@ -592,15 +592,15 @@ def _source_reasons(words: list[dict]) -> list[str]:
 
 def _similarity(original: str, edited: str) -> float:
     matcher = difflib.SequenceMatcher(
-        a=_tokens(original),
-        b=_tokens(edited),
+        a=tokens(original),
+        b=tokens(edited),
         autojunk=False,  # pragma: no mutate -- difflib reads autojunk only for truthiness
     )
     return matcher.ratio()
 
 
 def _wording_changed(original: str, edited: str) -> bool:
-    return _tokens(original) != _tokens(edited)
+    return tokens(original) != tokens(edited)
 
 
 def _speaker_changed(words: list[dict], speaker: str | None) -> bool:
@@ -697,7 +697,7 @@ def _verified_source_words(edited: dict) -> list[dict]:
     """Source words of a readable draft whose provenance and coverage still hold."""
     if edited.get("stage") != "readable":
         raise ValueError("Review requires a stage-3 readable JSON artifact.")
-    words = _source_words(_embedded_source(edited))
+    words = source_words(_embedded_source(edited))
     # Validate the complete reference coverage before asking the model to audit it.
     _check_exact_coverage(edited["paragraphs"], len(words))
     return words
@@ -706,7 +706,7 @@ def _verified_source_words(edited: dict) -> list[dict]:
 def _embedded_source(edited: dict) -> dict:
     """The source transcript embedded in a draft, if its fingerprint still matches."""
     source = edited.get("source_transcript")
-    if not isinstance(source, dict) or _fingerprint(source) != edited.get(
+    if not isinstance(source, dict) or fingerprint(source) != edited.get(
         "source_sha256"
     ):
         raise ValueError(

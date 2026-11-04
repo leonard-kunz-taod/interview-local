@@ -35,6 +35,10 @@ Every run gets a new directory under `transcripts/`. Existing nonempty output di
 | `02_speakers.txt`, `02_speakers.json` | Original words plus speaker IDs, timestamps, uncertainty and simultaneous-speech markers. Includes the raw transcript for provenance. |
 | `03_readable.txt`, `03_readable.md`, `03_readable.json` | Human-readable LLM draft with speaker paragraphs and time ranges. JSON is an audit artifact, not the main reading format. |
 | `04_review.txt`, `04_review.md`, `04_review.json` | Separately requested consistency comparison against the embedded source, with paragraph uncertainty labels and reasons. |
+| `source.wav` / `source.mp3` / `source.m4a` | Web UI runs only: the stored copy of the uploaded recording, used for playback in the editor. |
+| `corrections.json` | Web UI runs only: your manual corrections (paragraph text, speaker assignment, speaker names). The stage files above stay unchanged. |
+
+Every word in `01_raw.json` and `02_speakers.json` stores Whisper's word `probability` (0–1). Words without a corresponding Whisper word — whole-segment fallback text and words from the optional `--align` path — store `probability: null`.
 
 `transcript.txt` and `transcript.json` remain aliases of the speaker-attributed stage for compatibility. The raw and speaker versions are not overwritten by the LLM or reviewer.
 
@@ -109,6 +113,24 @@ Development hardware: Apple M3 Pro, 12 CPU cores, 18 GPU cores, **18 GB unified 
 - Historical two-minute speech test peaks were 3.20 GiB process RSS for Whisper, 0.96 GiB for alignment and 0.81 GiB for pyannote. These are not total system memory. Apple CPU/GPU share the same RAM; there is no additional dedicated VRAM. Model weight sizes are not measured peak RAM.
 
 Alignment stays opt-in (`--align`): on the original telephone test it worsened speaker-attributed word error from 37.57% to 44.97%. It changes word timing, not recognized text. There is no verified maximum recording duration. Close memory-intensive applications when needed.
+
+## Local web UI and transcript editor
+
+```bash
+.venv/bin/python -m interview_local --web
+# Keep web runs elsewhere (default: transcripts/)
+.venv/bin/python -m interview_local --web --runs-dir /path/to/runs
+```
+
+The server listens on `127.0.0.1` with a random free port, prints its URL and opens it in the browser. It is not reachable from other machines and rejects requests that do not address `127.0.0.1:<port>` or `localhost:<port>`. Press Ctrl+C in the terminal to stop it.
+
+- **New transcription:** choose a WAV, MP3 or M4A file and enter both speaker names. The recording is copied into a new run directory as `source.<ext>`. The page shows the running step (speech recognition, speaker recognition, LLM) and any error. One transcription runs at a time and cannot be cancelled from the browser. Ollama must be running with Ministral prepared. Speaker recognition needs the local `models/community-1` folder, `HF_TOKEN` or a cached `hf auth login`; the web UI never asks for a token. The web flow does not use `--align`.
+- **Editor:** paragraphs with speaker name and time range. Blue words differ from the speech recognition output (hover for the original word, or tick “Show original words”); words with a wavy red underline have a Whisper word probability below 0.5 or none at all. Orange paragraphs need a speaker check: simultaneous speech, unclear speaker boundary, no speaker match, unassigned, or speaker changed by the LLM. Assigning a paragraph manually clears this highlight.
+- **Corrections:** “Edit” turns a paragraph into a text field. Select words and use “Assign selection”, or “Assign paragraph”, to give text to a speaker; the paragraph is split accordingly. “Swap names” exchanges the two speaker names. Corrections are saved immediately to `corrections.json`; reopening the run from the start page shows them again.
+- **Audio:** click a word to play the recording from that word.
+- **Export:** “Export .md” / “Export .txt” download the corrected transcript.
+
+Only runs started from the web UI can be opened in the editor: older runs have no stored audio copy and no word probabilities. If `03_readable.json` of a run changes after corrections were saved, the editor refuses to open it rather than misapplying them.
 
 ## Optional native window
 

@@ -21,6 +21,7 @@ STEPS = {
     "asr": "2/5 Transcribe with Whisper large-v3 (CPU / INT8)",
     "align": "3/5 Align German words (CPU / Float32)",
     "diarize": "4/5 Identify two speakers (CPU / Float32)",
+    "check-access": "Checking local community-1 model / Hugging Face access if needed",
 }
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a"}
 COMPLETED_STAGE_FILES = (
@@ -82,7 +83,7 @@ def process(
     with tempfile.TemporaryDirectory(prefix=WORKSPACE_PREFIX) as directory:
         run = _Run(Path(directory), status, token, offline, output_dir)
         raw = _recognize_speech(source, run)
-        status("Checking local community-1 model / Hugging Face access if needed")
+        status(STEPS["check-access"])
         # pragma: no mutate start -- the check-access stage reads neither its source nor its target
         run.stage("check-access", source, run.work / "access")
         # pragma: no mutate end
@@ -144,15 +145,24 @@ def worker(
             _terminate(proc)
             raise
     if code:
-        detail = "\n".join(tail)
-        raise RuntimeError(
-            f"Stage '{stage}' failed.\n"
-            "For 401/403: renew your HF login/read token and accept the "
-            "community-1 conditions.\n"
-            "For download errors, check your connection or model cache. "
-            "If memory is low, close other apps.\n"
+        raise _stage_failure(stage, "\n".join(tail))
+
+
+def _stage_failure(stage: str, detail: str) -> RuntimeError:
+    if stage == "decode":
+        return RuntimeError(
+            "The file could not be read as audio. Check that it plays in an audio "
+            "player and is not DRM-protected, or try a WAV file.\n"
             f"Technical details:\n{detail}"
         )
+    return RuntimeError(
+        f"Stage '{stage}' failed.\n"
+        "For 401/403: renew your HF login/read token and accept the "
+        "community-1 conditions.\n"
+        "For download errors, check your connection or model cache. "
+        "If memory is low, close other apps.\n"
+        f"Technical details:\n{detail}"
+    )
 
 
 @dataclass

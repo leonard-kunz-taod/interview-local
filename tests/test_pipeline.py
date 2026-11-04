@@ -137,6 +137,7 @@ class ProcessTests(unittest.TestCase):
                 STEPS["decode"],
                 STEPS["asr"],
                 f"Original speech recognition output saved: {saved_raw}",
+                STEPS["check-access"],
                 STEPS["align"],
                 STEPS["diarize"],
             ],
@@ -157,8 +158,20 @@ class ProcessTests(unittest.TestCase):
 
     def test_without_alignment_whisper_word_timestamps_are_used(self):
         words = [
-            {"start": 0, "end": 0.4, "text": "Hallo", "timing": "whisper"},
-            {"start": 0.4, "end": 1, "text": "Welt", "timing": "whisper"},
+            {
+                "start": 0,
+                "end": 0.4,
+                "text": "Hallo",
+                "timing": "whisper",
+                "probability": 0.9,
+            },
+            {
+                "start": 0.4,
+                "end": 1,
+                "text": "Welt",
+                "timing": "whisper",
+                "probability": 0.9,
+            },
         ]
         segment = {"start": 0, "end": 1, "text": " Hallo Welt", "words": words}
         outputs = dict(OUTPUTS, asr={"segments": [segment]})
@@ -427,3 +440,20 @@ class WorkerLaunchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecodeFailureTests(unittest.TestCase):
+    def test_unreadable_audio_gets_its_own_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "notes.wav"
+            fake.write_text("This is not audio.")
+            with self.assertRaises(RuntimeError) as raised:
+                worker(
+                    "decode", fake, Path(directory) / "decoded.wav", silent, None, False
+                )
+        message = str(raised.exception)
+        names_audio_cause_without_login_advice = (
+            "could not be read as audio" in message,
+            "401/403" in message,
+        )
+        self.assertEqual(names_audio_cause_without_login_advice, (True, False))

@@ -49,14 +49,19 @@ def pulled(*updates):
 
 def german_source():
     return merge(
-        [Word(0.12345, 0.4567, "Grüße"), Word(0.4567, 0.9, "aus")],
+        [
+            Word(0.12345, 0.4567, "Grüße", 0.9, "whisper"),
+            Word(0.4567, 0.9, "aus", 0.9, "whisper"),
+        ],
         [Turn(0, 1, "s")],
         [],
     )
 
 
 def counted_source(count):
-    words = [Word(i * 0.1, i * 0.1 + 0.05, f"w{i}") for i in range(count)]
+    words = [
+        Word(i * 0.1, i * 0.1 + 0.05, f"w{i}", 0.9, "whisper") for i in range(count)
+    ]
     return merge(words, [Turn(0, count, "s")], [])
 
 

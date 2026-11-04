@@ -50,7 +50,7 @@ ALL_ARTIFACTS = (
 
 
 def named_speaker_transcript():
-    result = merge([Word(0, 1, "Grüße")], [Turn(0, 2, "x")], [])
+    result = merge([Word(0, 1, "Grüße", 0.9, "whisper")], [Turn(0, 2, "x")], [])
     result["speakers"]["A"] = "Änne"
     return result
 

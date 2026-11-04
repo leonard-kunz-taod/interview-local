@@ -41,24 +41,34 @@ def canonical_sha256(value):
 
 def two_word_source():
     return merge(
-        [Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")], [Turn(0, 1, "s")], []
+        [
+            Word(0, 0.3, "Hello", 0.9, "whisper"),
+            Word(0.3, 0.7, "there.", 0.9, "whisper"),
+        ],
+        [Turn(0, 1, "s")],
+        [],
     )
 
 
 def counted_source(count):
-    words = [Word(i * 0.1, i * 0.1 + 0.05, f"w{i}") for i in range(count)]
+    words = [
+        Word(i * 0.1, i * 0.1 + 0.05, f"w{i}", 0.9, "whisper") for i in range(count)
+    ]
     return merge(words, [Turn(0, count, "s")], [])
 
 
 def ten_word_source():
     text = "one two three four five six seven eight nine ten"
-    words = [Word(i, i + 0.5, t) for i, t in enumerate(text.split())]
+    words = [Word(i, i + 0.5, t, 0.9, "whisper") for i, t in enumerate(text.split())]
     return merge(words, [Turn(0, 11, "s")], [])
 
 
 def two_speaker_source():
     return merge(
-        [Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")],
+        [
+            Word(0, 0.3, "Hello", 0.9, "whisper"),
+            Word(0.3, 0.7, "there.", 0.9, "whisper"),
+        ],
         [Turn(0, 0.3, "s"), Turn(0.3, 1, "t")],
         [],
     )
@@ -67,7 +77,10 @@ def two_speaker_source():
 def source_with_a_second_speaker():
     """Both words are speaker A's, but speaker B exists in the transcript."""
     return merge(
-        [Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")],
+        [
+            Word(0, 0.3, "Hello", 0.9, "whisper"),
+            Word(0.3, 0.7, "there.", 0.9, "whisper"),
+        ],
         [Turn(0, 1, "s"), Turn(1, 2, "t")],
         [],
     )
@@ -75,7 +88,10 @@ def source_with_a_second_speaker():
 
 def timed_source(*spans):
     """One word per (start, end) span, all from one speaker."""
-    words = [Word(start, end, f"w{i}") for i, (start, end) in enumerate(spans)]
+    words = [
+        Word(start, end, f"w{i}", 0.9, "whisper")
+        for i, (start, end) in enumerate(spans)
+    ]
     return merge(words, [Turn(0, spans[-1][1] + 1, "s")], [])
 
 
@@ -169,7 +185,7 @@ class EditTests(unittest.TestCase):
         self.assertEqual(edited(source)["language"], "de")
 
     def test_source_fingerprint_is_the_sha256_of_its_canonical_json(self):
-        source = merge([Word(0, 0.3, "Grüße")], [Turn(0, 1, "s")], [])
+        source = merge([Word(0, 0.3, "Grüße", 0.9, "whisper")], [Turn(0, 1, "s")], [])
         self.assertEqual(edited(source)["source_sha256"], canonical_sha256(source))
 
     def test_long_source_is_edited_in_chunks_of_120_words(self):
@@ -196,7 +212,10 @@ class EditTests(unittest.TestCase):
 
     def test_joined_paragraph_combines_wording_sources_and_flags(self):
         source = merge(
-            [Word(0, 0.3, "Hello", "estimated"), Word(0.3, 0.7, "there.")],
+            [
+                Word(0, 0.3, "Hello", None, "estimated"),
+                Word(0.3, 0.7, "there.", 0.9, "whisper"),
+            ],
             [Turn(0, 1, "s")],
             [],
         )
@@ -219,7 +238,10 @@ class EditTests(unittest.TestCase):
 
     def test_joined_paragraph_unites_the_uncertainty_reasons_of_its_parts(self):
         source = merge(
-            [Word(0, 0.3, "Hello", "estimated"), Word(0.3, 0.7, "there.")],
+            [
+                Word(0, 0.3, "Hello", None, "estimated"),
+                Word(0.3, 0.7, "there.", 0.9, "whisper"),
+            ],
             [Turn(0, 1, "s")],
             [Turn(0, 1, "s"), Turn(0.4, 1, "t")],
         )
@@ -287,7 +309,9 @@ class EditTests(unittest.TestCase):
         )
 
     def test_lightly_edited_repetitive_speech_is_accepted(self):
-        words = [Word(i * 0.1, i * 0.1 + 0.05, "ja-also") for i in range(120)]
+        words = [
+            Word(i * 0.1, i * 0.1 + 0.05, "ja-also", 0.9, "whisper") for i in range(120)
+        ]
         source = merge(words, [Turn(0, 20, "s")], [])
         hesitation_added = " ".join(["ja-also"] * 60 + ["ähm"] + ["ja-also"] * 60)
         model = ScriptedModel(wording=hesitation_added)
@@ -309,7 +333,10 @@ class EditTests(unittest.TestCase):
 
     def test_source_uncertainty_reasons_carry_over_to_the_paragraph(self):
         source = merge(
-            [Word(0, 0.3, "Hello", "estimated"), Word(0.3, 0.7, "there.")],
+            [
+                Word(0, 0.3, "Hello", None, "estimated"),
+                Word(0.3, 0.7, "there.", 0.9, "whisper"),
+            ],
             [Turn(0, 1, "s")],
             [],
         )
@@ -321,7 +348,10 @@ class EditTests(unittest.TestCase):
 
     def test_overlapping_source_speech_marks_the_paragraph(self):
         source = merge(
-            [Word(0, 0.3, "Hello"), Word(0.3, 0.7, "there.")],
+            [
+                Word(0, 0.3, "Hello", 0.9, "whisper"),
+                Word(0.3, 0.7, "there.", 0.9, "whisper"),
+            ],
             [Turn(0, 1, "s")],
             [Turn(0, 1, "s"), Turn(0.5, 1, "t")],
         )
@@ -410,7 +440,7 @@ class RejectedEditTests(unittest.TestCase):
         )
 
     def test_rejected_word_without_text_is_shown_as_an_ellipsis(self):
-        source = merge([Word(0, 0.3, " ")], [Turn(0, 1, "s")], [])
+        source = merge([Word(0, 0.3, " ", 0.9, "whisper")], [Turn(0, 1, "s")], [])
         paragraph = edited(source, ScriptedModel(invalid_edits=2))["paragraphs"][0]
         self.assertEqual(paragraph["text"], "…")
 

@@ -5,11 +5,13 @@ import itertools
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Literal
 
 AMBIGUOUS_OVERLAP_RATIO = 0.8
 SEGMENT_PAUSE_SECONDS = 1.5
 SEGMENT_MAX_SECONDS = 35
 UNRELIABLE_TIMINGS = {"estimated", "whisper_fallback"}
+WHISPER_TIMINGS = frozenset({"whisper", "whisper_fallback"})
 SEGMENT_FIELDS = ("start", "end", "text", "speaker", "uncertain", "overlap")
 SEGMENT_FLAG_LABELS = (
     ("uncertain", "Review assignment"),
@@ -17,12 +19,31 @@ SEGMENT_FLAG_LABELS = (
 )
 
 
+Timing = Literal["whisper", "whisper_fallback", "aligned", "estimated"]
+
+
 @dataclass
 class Word:
+    """A recognized word.
+
+    ``probability`` is Whisper's word probability. It exists exactly for words
+    with Whisper timing; aligned and estimated words carry ``None`` because no
+    Whisper word corresponds to them.
+    """
+
     start: float
     end: float
     text: str
-    timing: str = "whisper"
+    probability: float | None
+    timing: Timing
+
+    def __post_init__(self):
+        has_whisper_timing = self.timing in WHISPER_TIMINGS
+        if has_whisper_timing != (self.probability is not None):
+            raise ValueError(
+                f"Word '{self.text}' with timing '{self.timing}' has an inconsistent "
+                f"Whisper probability ({self.probability})."
+            )
 
 
 @dataclass
@@ -90,6 +111,7 @@ def segment_words(segment: dict, timing: str) -> list[dict]:
             "end": segment["end"],
             "text": segment["text"],
             "timing": "estimated",
+            "probability": None,
         }
     ]
 
@@ -176,6 +198,7 @@ def _attributed_words(
                 "text": word.text.strip(),
                 "speaker": _best_speaker(candidates, labels),
                 "timing": word.timing,
+                "probability": word.probability,
                 "uncertain": bool(reasons),
                 "uncertainty_reasons": reasons,
                 "overlap": bool(simultaneous),

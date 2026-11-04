@@ -10,7 +10,7 @@ DRAFT_NOTICE = "Machine-generated draft. Check uncertain passages against the au
 
 def save_raw(raw: dict, directory: Path) -> None:
     """Save the unmodified speech recognition output as 01_raw.json/.txt."""
-    _save_json(directory / "01_raw.json", raw)
+    save_json(directory / "01_raw.json", raw)
     lines = ["RAW TRANSCRIPT — original speech recognition output", ""]
     for segment in raw["segments"]:
         time_range = f"{timestamp(segment['start'])} – {timestamp(segment['end'])}"
@@ -32,7 +32,7 @@ def save_speakers_with_aliases(result: dict, directory: Path) -> None:
 def save_readable(result: dict, directory: Path) -> None:
     """Save a readable draft as 03_readable.*, or a reviewed one as 04_review.*."""
     prefix = "04_review" if result["stage"] == "review" else "03_readable"
-    _save_json(directory / f"{prefix}.json", result)
+    save_json(directory / f"{prefix}.json", result)
     (directory / f"{prefix}.txt").write_text(readable_text(result), encoding="utf-8")
     (directory / f"{prefix}.md").write_text(readable_markdown(result), encoding="utf-8")
 
@@ -74,12 +74,21 @@ def _paragraph_heading(speakers: dict, paragraph: dict) -> str:
     return f"{name} · {time_range}{suffix}"
 
 
+def corrected_text(paragraphs: list[dict], markdown: bool) -> str:
+    """Render corrected paragraphs as a clean transcript without review markers."""
+    lines = [("# " if markdown else "") + "Corrected transcript", ""]
+    for p in paragraphs:
+        heading = f"{p['speaker_name']} · {timestamp(p['start'])}–{timestamp(p['end'])}"
+        lines += [("### " if markdown else "") + heading, "", p["text"], ""]
+    return "\n".join(lines)
+
+
 def _save_speaker_files(result: dict, stem: Path) -> None:
-    _save_json(stem.with_suffix(".json"), result)
+    save_json(stem.with_suffix(".json"), result)
     stem.with_suffix(".txt").write_text(render(result), encoding="utf-8")
 
 
-def _save_json(path: Path, value: dict) -> None:
+def save_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Replace atomically so interrupted writes do not leave a partial JSON file.
     # pragma: no mutate start -- replaced onto path before returning, so its name is never observed

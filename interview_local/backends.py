@@ -167,7 +167,13 @@ def _whisper_words(segment) -> list[dict]:
     if segment.words is None:
         raise RuntimeError("Whisper returned a segment without word timestamps.")
     return [
-        {"start": w.start, "end": w.end, "text": w.word, "timing": "whisper"}
+        {
+            "start": w.start,
+            "end": w.end,
+            "text": w.word,
+            "timing": "whisper",
+            "probability": float(w.probability),
+        }
         for w in segment.words
     ]
 
@@ -200,6 +206,7 @@ def _timed_words(
             "end": w.get("end", duration) + offset,
             "text": w["word"],
             "timing": "aligned" if "start" in w and "end" in w else "estimated",
+            "probability": None,
         }
         for w in aligned_words
     ]

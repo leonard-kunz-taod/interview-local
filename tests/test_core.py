@@ -5,17 +5,20 @@ from interview_local.core import Turn, Word, merge, overlap_regions, render, tim
 
 GREETING_TURNS = [Turn(0, 1, "cluster9"), Turn(1, 3, "cluster2")]
 GREETING_WORDS = [
-    Word(0.2, 0.6, "Guten"),
-    Word(0.6, 0.9, "Tag."),
-    Word(0.95, 1.3, "Hallo!"),
-    Word(5, 5.2, "Echo"),
+    Word(0.2, 0.6, "Guten", 0.9, "whisper"),
+    Word(0.6, 0.9, "Tag.", 0.9, "whisper"),
+    Word(0.95, 1.3, "Hallo!", 0.9, "whisper"),
+    Word(5, 5.2, "Echo", 0.9, "whisper"),
 ]
 NEIGHBOURING_TURNS = [Turn(0, 1, "x"), Turn(1, 2, "y")]
 
 
 def overlapping_interview():
     return merge(
-        [Word(0.2, 0.8, "Hello"), Word(1.1, 1.3, "yes")],
+        [
+            Word(0.2, 0.8, "Hello", 0.9, "whisper"),
+            Word(1.1, 1.3, "yes", 0.9, "whisper"),
+        ],
         [Turn(0, 1, "first"), Turn(1, 3, "second")],
         [Turn(0, 1.5, "first"), Turn(1, 3, "second")],
     )
@@ -32,21 +35,21 @@ class SpeakerAssignmentTests(unittest.TestCase):
         self.assertEqual(result["speakers"], {"A": "Speaker A", "B": "Speaker B"})
 
     def test_word_outside_every_turn_is_uncertain(self):
-        result = merge([Word(5, 5.2, "Echo")], GREETING_TURNS, [])
+        result = merge([Word(5, 5.2, "Echo", 0.9, "whisper")], GREETING_TURNS, [])
         reasons = result["words"][0]["uncertainty_reasons"]
         self.assertEqual(reasons, ["no_matching_speaker"])
 
     def test_near_tie_between_two_turns_is_flagged_ambiguous(self):
-        result = merge([Word(0.5, 1.5, "Ja")], NEIGHBOURING_TURNS, [])
+        result = merge([Word(0.5, 1.5, "Ja", 0.9, "whisper")], NEIGHBOURING_TURNS, [])
         reasons = result["words"][0]["uncertainty_reasons"]
         self.assertEqual(reasons, ["ambiguous_speaker_boundary"])
 
     def test_zero_length_word_goes_to_the_turn_containing_it(self):
-        result = merge([Word(1, 1, "42")], NEIGHBOURING_TURNS, [])
+        result = merge([Word(1, 1, "42", 0.9, "whisper")], NEIGHBOURING_TURNS, [])
         self.assertEqual(result["words"][0]["speaker"], "B")
 
     def test_zero_length_estimated_word_is_uncertain(self):
-        result = merge([Word(1, 1, "42", "estimated")], NEIGHBOURING_TURNS, [])
+        result = merge([Word(1, 1, "42", None, "estimated")], NEIGHBOURING_TURNS, [])
         reasons = result["words"][0]["uncertainty_reasons"]
         self.assertEqual(
             reasons, ["invalid_word_duration", "estimated_or_fallback_timing"]
@@ -60,29 +63,49 @@ class SpeakerAssignmentTests(unittest.TestCase):
         self.assertEqual(result["speakers"], {"A": "Speaker A", "B": "Speaker B"})
 
     def test_reliable_word_inside_one_turn_is_certain(self):
-        result = merge([Word(0.2, 0.6, "Guten")], GREETING_TURNS, [])
+        result = merge([Word(0.2, 0.6, "Guten", 0.9, "whisper")], GREETING_TURNS, [])
         word = result["words"][0]
         self.assertEqual((word["uncertain"], word["uncertainty_reasons"]), (False, []))
 
     def test_runner_up_overlapping_exactly_eighty_percent_is_ambiguous(self):
         best_overlap, runner_up_overlap = 2.5, 2.0
         turns = [Turn(0, best_overlap, "x"), Turn(best_overlap, 5, "y")]
-        word = Word(0, best_overlap + runner_up_overlap, "Ja")
+        word = Word(0, best_overlap + runner_up_overlap, "Ja", 0.9, "whisper")
         reasons = merge([word], turns, [])["words"][0]["uncertainty_reasons"]
         self.assertEqual(reasons, ["ambiguous_speaker_boundary"])
 
     def test_clear_majority_turn_is_not_ambiguous(self):
-        result = merge([Word(0.1, 1.1, "Ja")], NEIGHBOURING_TURNS, [])
+        result = merge([Word(0.1, 1.1, "Ja", 0.9, "whisper")], NEIGHBOURING_TURNS, [])
         word = result["words"][0]
         self.assertEqual((word["speaker"], word["uncertainty_reasons"]), ("A", []))
 
     def test_word_merely_touching_the_end_of_a_turn_is_unassigned(self):
-        result = merge([Word(2, 3, "danach")], [Turn(0, 2, "x")], [])
+        result = merge([Word(2, 3, "danach", 0.9, "whisper")], [Turn(0, 2, "x")], [])
         self.assertIsNone(result["words"][0]["speaker"])
 
     def test_zero_length_word_at_the_end_of_the_only_turn_is_unassigned(self):
-        result = merge([Word(1, 1, "42")], [Turn(0, 1, "x")], [])
+        result = merge([Word(1, 1, "42", 0.9, "whisper")], [Turn(0, 1, "x")], [])
         self.assertIsNone(result["words"][0]["speaker"])
+
+
+class WordProbabilityTests(unittest.TestCase):
+    def test_merge_copies_word_probability_unchanged(self):
+        words = [
+            Word(0, 0.5, "Guten", 0.42, "whisper"),
+            Word(0.5, 1, "Tag", None, "estimated"),
+        ]
+        result = merge(words, [Turn(0, 2, "x")], [])
+        self.assertEqual([w["probability"] for w in result["words"]], [0.42, None])
+
+    def test_whisper_word_requires_a_probability(self):
+        for timing in ("whisper", "whisper_fallback"):
+            with self.subTest(timing=timing), self.assertRaises(ValueError):
+                Word(0, 1, "Tag", None, timing)
+
+    def test_aligned_or_estimated_word_has_no_whisper_probability(self):
+        for timing in ("aligned", "estimated"):
+            with self.subTest(timing=timing), self.assertRaises(ValueError):
+                Word(0, 1, "Tag", 0.9, timing)
 
 
 class SegmentTests(unittest.TestCase):
@@ -93,19 +116,25 @@ class SegmentTests(unittest.TestCase):
 
     def test_pause_of_one_and_a_half_seconds_starts_a_new_segment(self):
         result = merge(
-            [Word(0, 1, "eins"), Word(2.5, 3, "zwei")], [Turn(0, 4, "x")], []
+            [Word(0, 1, "eins", 0.9, "whisper"), Word(2.5, 3, "zwei", 0.9, "whisper")],
+            [Turn(0, 4, "x")],
+            [],
         )
         texts = [s["text"] for s in result["segments"]]
         self.assertEqual(texts, ["eins", "zwei"])
 
     def test_segment_is_closed_once_it_would_reach_thirty_five_seconds(self):
-        words = [Word(i, i + 0.5, f"w{i}") for i in range(37)]
+        words = [Word(i, i + 0.5, f"w{i}", 0.9, "whisper") for i in range(37)]
         result = merge(words, [Turn(0, 40, "x")], [])
         sizes = [len(s["word_ids"]) for s in result["segments"]]
         self.assertEqual(sizes, [35, 2])
 
     def test_word_without_text_is_left_out_of_segments(self):
-        words = [Word(0, 0.5, "eins"), Word(0.5, 0.6, " "), Word(0.6, 1, "zwei")]
+        words = [
+            Word(0, 0.5, "eins", 0.9, "whisper"),
+            Word(0.5, 0.6, " ", 0.9, "whisper"),
+            Word(0.6, 1, "zwei", 0.9, "whisper"),
+        ]
         result = merge(words, [Turn(0, 2, "x")], [])
         self.assertEqual(
             [(s["text"], s["word_ids"]) for s in result["segments"]],
@@ -113,12 +142,18 @@ class SegmentTests(unittest.TestCase):
         )
 
     def test_segment_is_flagged_if_any_of_its_words_is(self):
-        words = [Word(0, 0.5, "eins"), Word(0.5, 1, "zwei", "estimated")]
+        words = [
+            Word(0, 0.5, "eins", 0.9, "whisper"),
+            Word(0.5, 1, "zwei", None, "estimated"),
+        ]
         segment = merge(words, [Turn(0, 2, "x")], [])["segments"][0]
         self.assertEqual((segment["uncertain"], segment["overlap"]), (True, False))
 
     def test_segment_keeps_the_flags_of_its_earlier_words(self):
-        words = [Word(0, 0.5, "eins"), Word(0.5, 1, "zwei")]
+        words = [
+            Word(0, 0.5, "eins", 0.9, "whisper"),
+            Word(0.5, 1, "zwei", 0.9, "whisper"),
+        ]
         interjection = Turn(0, 0.5, "y")
         result = merge(words, [Turn(0, 2, "x")], [Turn(0, 2, "x"), interjection])
         segment = result["segments"][0]
@@ -128,7 +163,7 @@ class SegmentTests(unittest.TestCase):
         )
 
     def test_word_ending_exactly_thirty_five_seconds_after_the_start_is_split(self):
-        words = [Word(i, i + 1, f"w{i}") for i in range(35)]
+        words = [Word(i, i + 1, f"w{i}", 0.9, "whisper") for i in range(35)]
         result = merge(words, [Turn(0, 40, "x")], [])
         sizes = [len(s["word_ids"]) for s in result["segments"]]
         self.assertEqual(sizes, [34, 1])
@@ -189,7 +224,7 @@ class OverlapTests(unittest.TestCase):
 
     def test_zero_length_word_at_the_start_of_an_overlap_is_flagged(self):
         result = merge(
-            [Word(1, 1, "ja")],
+            [Word(1, 1, "ja", 0.9, "whisper")],
             [Turn(0, 1, "first"), Turn(1, 3, "second")],
             [Turn(0, 1.5, "first"), Turn(1, 3, "second")],
         )
