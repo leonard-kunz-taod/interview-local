@@ -480,6 +480,13 @@ class AlignmentTests(unittest.TestCase):
             [(1.0, 1.3, "aligned"), (1.0, 2.0, "estimated")],
         )
 
+    def test_aligned_and_estimated_words_carry_no_whisper_probability(self):
+        result = aligned([{"word": "Test", "start": 0.0, "end": 0.3}, {"word": "42"}])
+        self.assertEqual(
+            [(w["timing"], w["probability"]) for w in result],
+            [("aligned", None), ("estimated", None)],
+        )
+
     def test_aligned_word_with_only_a_start_time_is_estimated(self):
         result = aligned(
             [{"word": "Test", "start": 0.0, "end": 0.3}, {"word": "42", "start": 0.4}]
