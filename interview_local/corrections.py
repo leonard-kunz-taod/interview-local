@@ -13,11 +13,11 @@ from .word_alignment import DisplayWord, align_text_to_source
 CORRECTIONS_FILENAME = "corrections.json"
 CORRECTIONS_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
-SUPPORTED_SCHEMA_VERSIONS = frozenset(
-    {LEGACY_SCHEMA_VERSION, CORRECTIONS_SCHEMA_VERSION}
-)
 COVERAGE_MESSAGE = (
     "Corrected paragraphs do not cover the source words exactly once in order."
+)
+_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {LEGACY_SCHEMA_VERSION, CORRECTIONS_SCHEMA_VERSION}
 )
 
 
@@ -83,7 +83,7 @@ def _stored_corrections(run_dir: Path, readable: dict) -> dict | None:
 
 def _require_supported_format(stored: dict, path: Path) -> None:
     if (
-        stored.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS
+        stored.get("schema_version") not in _SUPPORTED_SCHEMA_VERSIONS
         or stored.get("stage") != "corrections"
     ):
         raise ValueError(f"{path} is not a supported corrections file.")
@@ -174,18 +174,9 @@ def edit_paragraph_text(
     """
     if not tokens(text):
         raise ValueError("The paragraph text must contain at least one word.")
-    position = _paragraph_position(paragraphs, first_word)
-    edited = replace(
-        paragraphs[position], text=text.strip(), text_edited=True, checked=True
+    return _with_paragraph_changed(
+        paragraphs, first_word, text=text.strip(), text_edited=True, checked=True
     )
-    return paragraphs[:position] + [edited] + paragraphs[position + 1 :]
-
-
-def _paragraph_position(paragraphs: list[CorrectedParagraph], first_word: int) -> int:
-    for position, paragraph in enumerate(paragraphs):
-        if paragraph.first_word == first_word:
-            return position
-    raise ValueError(f"No paragraph starts at word {first_word}.")
 
 
 def set_paragraph_checked(
@@ -196,9 +187,23 @@ def set_paragraph_checked(
     Raises:
         ValueError: If no paragraph starts at first_word.
     """
+    return _with_paragraph_changed(paragraphs, first_word, checked=checked)
+
+
+def _with_paragraph_changed(
+    paragraphs: list[CorrectedParagraph], first_word: int, **changes: object
+) -> list[CorrectedParagraph]:
+    """A new list in which the paragraph starting at first_word has the given field values."""
     position = _paragraph_position(paragraphs, first_word)
-    marked = replace(paragraphs[position], checked=checked)
-    return paragraphs[:position] + [marked] + paragraphs[position + 1 :]
+    changed = replace(paragraphs[position], **changes)
+    return paragraphs[:position] + [changed] + paragraphs[position + 1 :]
+
+
+def _paragraph_position(paragraphs: list[CorrectedParagraph], first_word: int) -> int:
+    for position, paragraph in enumerate(paragraphs):
+        if paragraph.first_word == first_word:
+            return position
+    raise ValueError(f"No paragraph starts at word {first_word}.")
 
 
 def reassign_words(

@@ -34,7 +34,7 @@ def document_of(readable, paragraphs=None):
 
 
 class DocumentTests(unittest.TestCase):
-    def test_document_carries_the_speaker_names_and_the_low_confidence_threshold(self):
+    def test_document_carries_the_speaker_names_and_the_word_marking_thresholds(self):
         document = document_of(readable_transcript(TWO_PARAGRAPHS))
         self.assertEqual(
             {key: value for key, value in document.items() if key != "paragraphs"},
@@ -47,7 +47,7 @@ class DocumentTests(unittest.TestCase):
 
 
 class ParagraphTests(unittest.TestCase):
-    def test_paragraph_shows_its_word_range_speaker_source_time_range_text_and_edit_marks(
+    def test_paragraph_shows_its_word_range_speaker_source_time_range_text_and_review_marks(
         self,
     ):
         paragraph = dict(
