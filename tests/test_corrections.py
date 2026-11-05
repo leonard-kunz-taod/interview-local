@@ -383,9 +383,10 @@ class EditTextTests(unittest.TestCase):
 class ReassignTests(unittest.TestCase):
     def setUp(self):
         self.readable = readable_transcript(TWO_PARAGRAPHS)
-        self.paragraphs = load_corrected_paragraphs(
-            Path("/nonexistent-run"), self.readable
-        )
+        with tempfile.TemporaryDirectory() as run_without_corrections:
+            self.paragraphs = load_corrected_paragraphs(
+                Path(run_without_corrections), self.readable
+            )
 
     def test_middle_selection_splits_into_three_paragraphs(self):
         result = reassign(self.readable, self.paragraphs, 5, 6, "A")

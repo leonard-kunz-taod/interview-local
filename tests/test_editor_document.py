@@ -1,4 +1,5 @@
 import copy
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -25,11 +26,16 @@ from interview_local.editor_document import (
 )
 
 NAMES = {"A": "Anna", "B": "Bernd"}
-NO_CORRECTIONS = Path("/nonexistent-run")
+
+
+def unedited_paragraphs(readable):
+    """The paragraphs of a run without corrections: the readable transcript's own."""
+    with tempfile.TemporaryDirectory() as run_without_corrections:
+        return load_corrected_paragraphs(Path(run_without_corrections), readable)
 
 
 def document_of(readable, paragraphs=None):
-    paragraphs = paragraphs or load_corrected_paragraphs(NO_CORRECTIONS, readable)
+    paragraphs = paragraphs or unedited_paragraphs(readable)
     return build_editor_document(readable, paragraphs, NAMES)
 
 
@@ -73,9 +79,7 @@ class ParagraphTests(unittest.TestCase):
 
     def test_checked_paragraph_carries_its_review_status(self):
         readable = readable_transcript(TWO_PARAGRAPHS)
-        paragraphs = set_paragraph_checked(
-            load_corrected_paragraphs(NO_CORRECTIONS, readable), 4, True
-        )
+        paragraphs = set_paragraph_checked(unedited_paragraphs(readable), 4, True)
         self.assertEqual(
             [p["checked"] for p in document_of(readable, paragraphs)["paragraphs"]],
             [False, True],
@@ -126,9 +130,7 @@ class ParagraphTests(unittest.TestCase):
             [TWO_PARAGRAPHS[0], (4, 7, "A", "Danke, gut. Und selbst?")],
             regular_turns=regular,
         )
-        paragraphs = reassign(
-            readable, load_corrected_paragraphs(NO_CORRECTIONS, readable), 4, 7, "B"
-        )
+        paragraphs = reassign(readable, unedited_paragraphs(readable), 4, 7, "B")
         paragraph = document_of(readable, paragraphs)["paragraphs"][1]
         self.assertEqual(
             (paragraph["speaker"], paragraph["speaker_uncertainty"]), ("B", [])
@@ -138,7 +140,7 @@ class ParagraphTests(unittest.TestCase):
         readable = readable_transcript(TWO_PARAGRAPHS)
         document = build_editor_document(
             readable,
-            load_corrected_paragraphs(NO_CORRECTIONS, readable),
+            unedited_paragraphs(readable),
             {"A": "Bernd", "B": "Anna"},
         )
         self.assertEqual(
@@ -176,7 +178,7 @@ class WordTests(unittest.TestCase):
             "Guten Morgen, wie geht's? Danke, gut. Und selbst?"
         )
         paragraphs = edit_paragraph_text(
-            load_corrected_paragraphs(NO_CORRECTIONS, readable),
+            unedited_paragraphs(readable),
             0,
             "Guten Tag, wie geht's? Danke, gut. Und selbst?",
         )
@@ -247,7 +249,7 @@ class LongSilenceTests(unittest.TestCase):
     def test_inserted_word_after_a_long_silence_is_not_marked(self):
         readable = silence_before_second_paragraph(LONG_SILENCE_SECONDS)
         paragraphs = edit_paragraph_text(
-            load_corrected_paragraphs(NO_CORRECTIONS, readable),
+            unedited_paragraphs(readable),
             4,
             "Also Danke, gut. Und selbst?",
         )
@@ -278,7 +280,7 @@ def corrected_uncertain_document():
     regular = INTERVIEW_TURNS + [Turn(5.4, 6.1, "first")]
     readable = readable_transcript(TWO_PARAGRAPHS, regular_turns=regular)
     paragraphs = edit_paragraph_text(
-        load_corrected_paragraphs(NO_CORRECTIONS, readable), 4, "Danke, sehr gut."
+        unedited_paragraphs(readable), 4, "Danke, sehr gut."
     )
     return document_of(readable, paragraphs)
 
