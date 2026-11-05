@@ -70,14 +70,14 @@ def score(
     return score_transcript(rows, hypothesis, offset, start, end)
 
 
-def read_reference(reference_file: Path) -> list[dict]:
+def read_reference(reference_file: Path) -> list[dict[str, str]]:
     """The rows of a CALLHOME TSV with Beg, End, Speaker and Text columns."""
     with reference_file.open(encoding="utf-8") as table:
         return list(csv.DictReader(table, delimiter="\t"))
 
 
 def score_transcript(
-    reference_rows: list[dict],
+    reference_rows: list[dict[str, str]],
     hypothesis: dict,
     offset: float,
     start: float,
@@ -113,7 +113,7 @@ def score_transcript(
     if _is_readable(hypothesis):
         _add_cpwer(report, reference, hyp)
         return report
-    if hypothesis.get("diarization") is None:
+    if "diarization" not in hypothesis:
         return report
     report["der"] = _diarization_error(reference, hypothesis["diarization"], start, end)
     report["der_conditions"] = DER_CONDITIONS
@@ -185,9 +185,8 @@ def _transcript_words(hypothesis: dict) -> list[dict]:
     transcript, or the segment words of a raw one."""
     if _is_readable(hypothesis):
         return _readable_words(hypothesis)
-    words = hypothesis.get("words")
-    if words is not None:
-        return words
+    if "words" in hypothesis:
+        return hypothesis["words"]
     return _segment_words(hypothesis)
 
 
@@ -237,8 +236,8 @@ def _timed_display_words(paragraph: dict, selected: list[dict]) -> list[dict]:
 
 
 def _segment_words(raw: dict) -> list[dict]:
-    """The words of a raw transcript's segments; a segment may have none."""
-    return [w for s in raw["segments"] for w in s.get("words", [])]
+    """The words of a raw transcript's segments."""
+    return [w for s in raw["segments"] for w in s["words"]]
 
 
 def _word_errors(reference: list[dict], hyp: list[dict]) -> dict:

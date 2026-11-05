@@ -14,6 +14,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 # The benchmark writes no files outside .mlflow/, including bytecode caches of
 # the modules imported below.
@@ -147,7 +148,7 @@ def _scored(case: BenchmarkCase, transcript: dict) -> dict:
     )
 
 
-def run_params(case: BenchmarkCase, model_digest: str) -> dict:
+def run_params(case: BenchmarkCase, model_digest: str) -> dict[str, str | float]:
     """Everything that determines the LLM stage's output for one case."""
     return {
         "case": case.name,
@@ -191,7 +192,7 @@ def _row(label: str, *cells: str) -> str:
 
 
 def _benchmark_run(
-    mlflow, case: BenchmarkCase, speakers: dict, model_digest: str
+    mlflow: ModuleType, case: BenchmarkCase, speakers: dict, model_digest: str
 ) -> dict[str, float]:
     """Run the LLM stage on one case as an MLflow run; return its logged metrics."""
     with mlflow.start_run(run_name=case.name):
@@ -210,7 +211,7 @@ def _benchmark_run(
     return metrics
 
 
-def _local_mlflow():
+def _local_mlflow() -> ModuleType:
     """MLflow tracking into .mlflow/ (sqlite), without telemetry."""
     os.environ["MLFLOW_DISABLE_TELEMETRY"] = "true"
     os.environ["MLFLOW_DISABLE_AGENT_HINT"] = "1"
@@ -229,7 +230,7 @@ def _local_mlflow():
     return mlflow
 
 
-def _trace_llm_calls(mlflow) -> None:
+def _trace_llm_calls(mlflow: ModuleType) -> None:
     """Record every chat, edit attempt and wording check as an MLflow span.
 
     A rejected edit attempt is recorded as an error span carrying the rejection

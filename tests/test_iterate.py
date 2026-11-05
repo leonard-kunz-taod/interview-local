@@ -8,7 +8,7 @@ import tomllib
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from support.fake_ollama import DIGEST, FakeOllama, ScriptedModel, served_by
@@ -91,10 +91,11 @@ def reference_case():
         )
 
 
-class LocalRunStore:
+class LocalRunStore(ModuleType):
     """The MLflow calls the benchmark makes, recording runs in memory."""
 
     def __init__(self):
+        super().__init__("mlflow")
         self.runs = {}
         self.active = None
         self.tracking_uri = None

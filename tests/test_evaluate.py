@@ -38,6 +38,7 @@ WORDS = [
     {"start": 1, "end": 1.5, "text": "Hallo", "speaker": "B"},
     {"start": 2.5, "end": 3, "text": "Danach", "speaker": "B"},
 ]
+WORDS_HYPOTHESIS = {"words": WORDS}
 TURNS = [
     {"start": 0, "end": 1, "speaker": "A"},
     {"start": 1, "end": 2, "speaker": "B"},
@@ -103,10 +104,6 @@ class ScoreTests(unittest.TestCase):
 
     def test_words_are_read_from_segments_without_a_word_list(self):
         report = scored({"segments": [{"words": WORDS}]})
-        self.assertEqual(word_error_summary(report), EXPECTED_WER)
-
-    def test_raw_segment_without_words_contributes_none(self):
-        report = scored({"segments": [{"words": WORDS}, {"text": "Danke"}]})
         self.assertEqual(word_error_summary(report), EXPECTED_WER)
 
     def test_window_without_reference_words_is_rejected(self):
@@ -313,16 +310,17 @@ class ReadableScoreTests(unittest.TestCase):
 
 class CommandLineTests(unittest.TestCase):
     def evaluate(
-        self, *extra, window=("--offset", "10", "--end", "2"), hypothesis=None
+        self,
+        *extra,
+        window=("--offset", "10", "--end", "2"),
+        hypothesis=WORDS_HYPOTHESIS,
     ):
         """Printed report and the files left in the working directory."""
         with tempfile.TemporaryDirectory() as directory:
             reference_file = Path(directory) / "reference.tsv"
             hypothesis_file = Path(directory) / "hypothesis.json"
             reference_file.write_text(REFERENCE, encoding="utf-8")
-            hypothesis_file.write_text(
-                json.dumps(hypothesis or {"words": WORDS}), encoding="utf-8"
-            )
+            hypothesis_file.write_text(json.dumps(hypothesis), encoding="utf-8")
             arguments = [reference_file, hypothesis_file, *window, *extra]
             printed = io.StringIO()
             with (
