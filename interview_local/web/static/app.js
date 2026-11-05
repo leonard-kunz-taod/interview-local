@@ -185,7 +185,7 @@ function renderParagraph(paragraph) {
   }
   block.append(renderParagraphHeader(paragraph));
   if (paragraph.speaker_uncertainty.length) {
-    const reasons = paragraph.speaker_uncertainty.map((reason) => REASON_LABELS[reason] || reason);
+    const reasons = paragraph.speaker_uncertainty.map((reason) => REASON_LABELS[reason]);
     block.append(Object.assign(document.createElement("p"), {
       className: "speaker-reasons",
       textContent: `Check speaker: ${reasons.join(", ")}`,
@@ -400,7 +400,7 @@ function wordSpanOf(node) {
 
 function updateSelection() {
   const selection = window.getSelection();
-  if (selection.isCollapsed || !selection.rangeCount) {
+  if (selection.isCollapsed) {
     clearSelection();
     return;
   }
