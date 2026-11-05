@@ -51,11 +51,11 @@ def main() -> None:
         speakers = verified_speakers(case)
         verify_reference(case)
         inputs.append((case, speakers))
-    identity = llm.OllamaClient().ready()
+    model_digest = llm.OllamaClient().ready()["digest"]
     mlflow = _local_mlflow()
     _trace_llm_calls(mlflow)
     for case, speakers in inputs:
-        print(format_table(_benchmark_run(mlflow, case, speakers, identity)))
+        print(format_table(_benchmark_run(mlflow, case, speakers, model_digest)))
 
 
 def load_cases(cases_file: Path) -> list[BenchmarkCase]:
@@ -141,12 +141,13 @@ def stage_comparison(
 
 
 def _scored(case: BenchmarkCase, transcript: dict) -> dict:
+    reference_rows = evaluate.read_reference(case.reference)
     return evaluate.score_transcript(
-        case.reference, transcript, case.offset, case.start, case.end
+        reference_rows, transcript, case.offset, case.start, case.end
     )
 
 
-def run_params(case: BenchmarkCase, identity: dict) -> dict:
+def run_params(case: BenchmarkCase, model_digest: str) -> dict:
     """Everything that determines the LLM stage's output for one case."""
     return {
         "case": case.name,
@@ -157,7 +158,7 @@ def run_params(case: BenchmarkCase, identity: dict) -> dict:
         "similarity_threshold": llm.MIN_WORDING_SIMILARITY,
         "chunk_words": llm.EDIT_CHUNK_WORDS,
         "model": llm.MODEL,
-        "model_digest": identity["digest"],
+        "model_digest": model_digest,
     }
 
 
@@ -190,11 +191,11 @@ def _row(label: str, *cells: str) -> str:
 
 
 def _benchmark_run(
-    mlflow, case: BenchmarkCase, speakers: dict, identity: dict
+    mlflow, case: BenchmarkCase, speakers: dict, model_digest: str
 ) -> dict[str, float]:
     """Run the LLM stage on one case as an MLflow run; return its logged metrics."""
     with mlflow.start_run(run_name=case.name):
-        mlflow.log_params(run_params(case, identity))
+        mlflow.log_params(run_params(case, model_digest))
         started = time.perf_counter()
         readable = llm.enhance(speakers, print)
         llm_stage_seconds = time.perf_counter() - started

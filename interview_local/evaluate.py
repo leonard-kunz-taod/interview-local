@@ -65,12 +65,23 @@ def score(
     Raises:
         ValueError: The window holds no reference words.
     """
+    rows = read_reference(reference_file)
     hypothesis = json.loads(hypothesis_file.read_text(encoding="utf-8"))
-    return score_transcript(reference_file, hypothesis, offset, start, end)
+    return score_transcript(rows, hypothesis, offset, start, end)
+
+
+def read_reference(reference_file: Path) -> list[dict]:
+    """The rows of a CALLHOME TSV with Beg, End, Speaker and Text columns."""
+    with reference_file.open(encoding="utf-8") as table:
+        return list(csv.DictReader(table, delimiter="\t"))
 
 
 def score_transcript(
-    reference_file: Path, hypothesis: dict, offset: float, start: float, end: float
+    reference_rows: list[dict],
+    hypothesis: dict,
+    offset: float,
+    start: float,
+    end: float,
 ) -> dict:
     """WER inside one time window; DER with diarization; cpWER with speakers.
 
@@ -78,7 +89,7 @@ def score_transcript(
     speakers, not diarization turns.
 
     Args:
-        reference_file: CALLHOME TSV with Beg, End, Speaker and Text columns.
+        reference_rows: CALLHOME TSV rows, as returned by ``read_reference``.
         hypothesis: Raw, speaker or readable transcript produced by the app.
         offset: Original-recording offset subtracted from reference timestamps.
         start: Window start in seconds.
@@ -87,9 +98,7 @@ def score_transcript(
     Raises:
         ValueError: The window holds no reference words.
     """
-    with reference_file.open(encoding="utf-8") as table:
-        rows = list(csv.DictReader(table, delimiter="\t"))
-    reference = _reference_utterances(rows, offset, start, end)
+    reference = _reference_utterances(reference_rows, offset, start, end)
     hyp = _hypothesis_words(hypothesis, start, end)
     report = _word_errors(reference, hyp)
     report.update(
@@ -101,7 +110,7 @@ def score_transcript(
             "caveat": CAVEAT,
         }
     )
-    if hypothesis.get("stage") == "readable":
+    if _is_readable(hypothesis):
         _add_cpwer(report, reference, hyp)
         return report
     if hypothesis.get("diarization") is None:
@@ -110,6 +119,10 @@ def score_transcript(
     report["der_conditions"] = DER_CONDITIONS
     _add_cpwer(report, reference, hyp)
     return report
+
+
+def _is_readable(transcript: dict) -> bool:
+    return transcript.get("stage") == "readable"
 
 
 def _add_cpwer(report: dict, reference: list[dict], hyp: list[dict]) -> None:
@@ -170,7 +183,7 @@ def _hypothesis_words(hypothesis: dict, start: float, end: float) -> list[dict]:
 def _transcript_words(hypothesis: dict) -> list[dict]:
     """The words of a readable transcript's paragraphs, the word list of a speaker
     transcript, or the segment words of a raw one."""
-    if hypothesis.get("stage") == "readable":
+    if _is_readable(hypothesis):
         return _readable_words(hypothesis)
     words = hypothesis.get("words")
     if words is not None:
