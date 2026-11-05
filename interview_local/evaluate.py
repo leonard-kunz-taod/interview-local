@@ -188,7 +188,7 @@ def _transcript_words(hypothesis: dict) -> list[dict]:
     words = hypothesis.get("words")
     if words is not None:
         return words
-    return [w for s in hypothesis["segments"] for w in s.get("words", [])]
+    return _segment_words(hypothesis)
 
 
 def _readable_words(readable: dict) -> list[dict]:
@@ -204,13 +204,20 @@ def _readable_words(readable: dict) -> list[dict]:
 def _paragraph_words(paragraph: dict, words: list[dict]) -> list[dict]:
     """Display words of one paragraph with the times of their source words.
 
-    A word the editor inserted takes the times of the preceding source word, or
-    of the paragraph's first source word when nothing precedes it. A paragraph
-    text without word tokens contributes no words.
+    A paragraph text without word tokens contributes no words.
     """
     if not tokens(paragraph["text"]):
         return []
     selected = [words[i] for i in paragraph["source_word_ids"]]
+    return _timed_display_words(paragraph, selected)
+
+
+def _timed_display_words(paragraph: dict, selected: list[dict]) -> list[dict]:
+    """The paragraph's display words, timed by the selected source words.
+
+    A word the editor inserted takes the times of the preceding source word, or
+    of the paragraph's first source word when nothing precedes it.
+    """
     by_id = {w["word_id"]: w for w in selected}
     preceding = selected[0]
     timed = []
@@ -227,6 +234,11 @@ def _paragraph_words(paragraph: dict, words: list[dict]) -> list[dict]:
             }
         )
     return timed
+
+
+def _segment_words(raw: dict) -> list[dict]:
+    """The words of a raw transcript's segments; a segment may have none."""
+    return [w for s in raw["segments"] for w in s.get("words", [])]
 
 
 def _word_errors(reference: list[dict], hyp: list[dict]) -> dict:

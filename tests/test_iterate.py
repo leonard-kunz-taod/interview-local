@@ -1,11 +1,14 @@
 import ast
 import hashlib
 import json
+import os
+import sys
 import tempfile
 import tomllib
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support.fake_ollama import DIGEST, FakeOllama, ScriptedModel, served_by
@@ -94,6 +97,25 @@ class LocalRunStore:
     def __init__(self):
         self.runs = {}
         self.active = None
+        self.tracking_uri = None
+        self.experiments = {}
+        self.experiment_id = None
+
+    def set_tracking_uri(self, uri):
+        self.tracking_uri = uri
+
+    def get_experiment_by_name(self, name):
+        return self.experiments.get(name)
+
+    def create_experiment(self, name, artifact_location):
+        experiment_id = str(len(self.experiments))
+        self.experiments[name] = SimpleNamespace(
+            experiment_id=experiment_id, artifact_location=artifact_location
+        )
+        return experiment_id
+
+    def set_experiment(self, experiment_id):
+        self.experiment_id = experiment_id
 
     @contextmanager
     def start_run(self, run_name):
@@ -266,6 +288,68 @@ class RunSummaryTests(unittest.TestCase):
         )
 
 
+@contextmanager
+def local_tracking(store):
+    """The store stands in for mlflow, tracking into a temporary .mlflow/."""
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        patch.dict(sys.modules, {"mlflow": store}),
+        patch.dict(os.environ),
+        patch.object(iterate, "MLFLOW_DIR", Path(directory) / ".mlflow"),
+    ):
+        yield iterate.MLFLOW_DIR
+
+
+class LocalTrackingTests(unittest.TestCase):
+    def test_runs_are_tracked_in_sqlite_inside_the_mlflow_directory(self):
+        store = LocalRunStore()
+        with local_tracking(store) as mlflow_dir:
+            iterate._local_mlflow()
+            created = mlflow_dir.is_dir()
+        self.assertEqual(
+            (store.tracking_uri, created),
+            (f"sqlite:///{(mlflow_dir / 'mlflow.db').as_posix()}", True),
+        )
+
+    def test_missing_experiment_is_created_with_artifacts_in_the_mlflow_directory(
+        self,
+    ):
+        store = LocalRunStore()
+        with local_tracking(store) as mlflow_dir:
+            iterate._local_mlflow()
+        experiment = store.experiments[iterate.EXPERIMENT_NAME]
+        self.assertEqual(
+            (experiment.artifact_location, store.experiment_id),
+            ((mlflow_dir / "artifacts").as_posix(), experiment.experiment_id),
+        )
+
+    def test_existing_experiment_is_reused(self):
+        store = LocalRunStore()
+        existing = SimpleNamespace(experiment_id="7", artifact_location="kept")
+        store.experiments[iterate.EXPERIMENT_NAME] = existing
+        with local_tracking(store):
+            iterate._local_mlflow()
+        self.assertEqual(
+            (store.experiments, store.experiment_id),
+            ({iterate.EXPERIMENT_NAME: existing}, "7"),
+        )
+
+    def test_tracking_sends_no_telemetry_or_agent_hints(self):
+        with local_tracking(LocalRunStore()):
+            iterate._local_mlflow()
+            switches = (
+                os.environ["MLFLOW_DISABLE_TELEMETRY"],
+                os.environ["MLFLOW_DISABLE_AGENT_HINT"],
+            )
+        self.assertEqual(switches, ("true", "1"))
+
+    def test_the_configured_mlflow_is_returned(self):
+        store = LocalRunStore()
+        with local_tracking(store):
+            configured = iterate._local_mlflow()
+        self.assertIs(configured, store)
+
+
 class AppIsolationTests(unittest.TestCase):
     def test_app_modules_do_not_import_mlflow(self):
         imported = {
@@ -289,12 +373,27 @@ class AppIsolationTests(unittest.TestCase):
 
 
 def imported_modules(source):
-    tree = ast.parse(source.read_text("utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            yield from (alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            yield node.module
+    nodes = list(ast.walk(ast.parse(source.read_text("utf-8"))))
+    return import_statement_modules(nodes) + from_import_modules(nodes)
+
+
+def import_statement_modules(nodes):
+    """Modules named by ``import a, b`` statements."""
+    return [
+        alias.name
+        for node in nodes
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ]
+
+
+def from_import_modules(nodes):
+    """Modules named by ``from a import b``; ``from . import b`` names none."""
+    return [
+        node.module
+        for node in nodes
+        if isinstance(node, ast.ImportFrom) and node.module
+    ]
 
 
 if __name__ == "__main__":
