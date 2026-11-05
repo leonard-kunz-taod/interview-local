@@ -9,10 +9,15 @@ const REASON_LABELS = {
   unassigned: "no speaker assigned",
   speaker_changed_by_llm: "speaker changed by LLM",
 };
+const RESUME_REWIND_SECONDS = 2;
+const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5];
+const DEFAULT_PLAYBACK_RATE = 1;
 
 const $ = (id) => document.getElementById(id);
 let currentDocument = null;
 let currentSelection = null;
+let pausedAt = null;
+let wordTimeline = [];
 
 class ApiError extends Error {}
 
@@ -152,6 +157,20 @@ function renderDocument(loaded) {
   showError($("editor-error"), "");
   const container = $("paragraphs");
   container.replaceChildren(...loaded.paragraphs.map(renderParagraph));
+  renderReviewProgress(loaded.paragraphs);
+  buildWordTimeline();
+}
+
+function renderReviewProgress(paragraphs) {
+  const checkedCount = paragraphs.filter((paragraph) => paragraph.checked).length;
+  $("review-progress").textContent = `${checkedCount} of ${paragraphs.length} paragraphs checked`;
+}
+
+function buildWordTimeline() {
+  wordTimeline = [...$("paragraphs").querySelectorAll(".word")]
+    .filter((span) => span.dataset.sourceIds)
+    .map((span) => ({ seekTime: Number(span.dataset.seekTime), span }))
+    .sort((first, second) => first.seekTime - second.seekTime);
 }
 
 function renderParagraph(paragraph) {
@@ -160,6 +179,9 @@ function renderParagraph(paragraph) {
   block.dataset.firstWord = paragraph.first_word;
   if (paragraph.speaker_uncertainty.length) {
     block.classList.add("speaker-uncertain");
+  }
+  if (paragraph.checked) {
+    block.classList.add("checked");
   }
   block.append(renderParagraphHeader(paragraph));
   if (paragraph.speaker_uncertainty.length) {
@@ -191,8 +213,24 @@ function renderParagraphHeader(paragraph) {
   const select = speakerSelect();
   const assign = Object.assign(document.createElement("button"), { type: "button", textContent: "Assign paragraph" });
   assign.addEventListener("click", () => reassign(paragraph.first_word, paragraph.last_word, select.value));
-  header.append(" ", select, assign);
+  header.append(" ", select, assign, " ", checkedToggle(paragraph));
   return header;
+}
+
+function checkedToggle(paragraph) {
+  const checkbox = Object.assign(document.createElement("input"), { type: "checkbox", checked: paragraph.checked });
+  checkbox.addEventListener("change", () => setChecked(paragraph.first_word, checkbox.checked));
+  const label = document.createElement("label");
+  label.append(checkbox, " checked");
+  return label;
+}
+
+async function setChecked(firstWord, checked) {
+  try {
+    renderDocument(await sendJson(runPath(`paragraphs/${firstWord}/checked`), "PUT", { checked }));
+  } catch (error) {
+    showError($("editor-error"), error.message);
+  }
 }
 
 function speakerSelect() {
@@ -217,6 +255,7 @@ function renderWord(word, index) {
   const span = Object.assign(document.createElement("span"), { textContent: word.text });
   span.dataset.wordIndex = index;
   span.dataset.sourceIds = word.source_word_ids.join(",");
+  span.dataset.seekTime = word.seek_time;
   span.className = "word";
   if (word.change !== "unchanged") {
     span.classList.add("llm-changed");
@@ -225,6 +264,11 @@ function renderWord(word, index) {
   if (word.low_asr_confidence) {
     span.classList.add("low-asr-confidence");
     span.title = [span.title, "Speech recognition uncertain"].filter(Boolean).join(" · ");
+  }
+  if (word.after_long_silence) {
+    span.classList.add("after-long-silence");
+    const warning = `Possibly invented text: at least ${currentDocument.long_silence_seconds} s silence before`;
+    span.title = [span.title, warning].filter(Boolean).join(" · ");
   }
   span.addEventListener("click", () => seek(word.seek_time));
   nodes.push(span);
@@ -244,6 +288,80 @@ function seek(seconds) {
   const audio = $("audio");
   audio.currentTime = seconds;
   audio.play().catch((error) => showError($("editor-error"), `Playback failed: ${error.message}`));
+}
+
+function rememberPausePosition() {
+  const audio = $("audio");
+  pausedAt = audio.ended ? null : audio.currentTime;
+}
+
+function rewindOnResume() {
+  const audio = $("audio");
+  if (audio.currentTime === pausedAt) {
+    audio.currentTime = Math.max(0, pausedAt - RESUME_REWIND_SECONDS);
+  }
+  pausedAt = null;
+}
+
+function renderPlaybackRates() {
+  const rateSelect = $("playback-rate");
+  for (const rate of PLAYBACK_RATES) {
+    const isDefault = rate === DEFAULT_PLAYBACK_RATE;
+    rateSelect.append(new Option(`${rate}×`, rate, isDefault, isDefault));
+  }
+}
+
+function applyPlaybackRate() {
+  const audio = $("audio");
+  const rate = Number($("playback-rate").value);
+  audio.defaultPlaybackRate = rate;
+  audio.playbackRate = rate;
+}
+
+function followWhilePlaying() {
+  followPlayback();
+  if (!$("audio").paused) {
+    requestAnimationFrame(followWhilePlaying);
+  }
+}
+
+function followPlayback() {
+  const index = lastStartedWordIndex($("audio").currentTime);
+  const playing = index < 0 ? null : wordTimeline[index].span;
+  const highlighted = $("paragraphs").querySelector(".playing-word");
+  if (playing === highlighted) {
+    return;
+  }
+  highlighted?.classList.remove("playing-word");
+  if (playing) {
+    playing.classList.add("playing-word");
+    scrollIntoViewIfHidden(playing);
+  }
+}
+
+function lastStartedWordIndex(time) {
+  let low = 0;
+  let high = wordTimeline.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (wordTimeline[middle].seekTime <= time) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low - 1;
+}
+
+function scrollIntoViewIfHidden(span) {
+  if (document.querySelector(".paragraph-editor")) {
+    return;
+  }
+  const visibleTop = $("editor-toolbar").getBoundingClientRect().bottom;
+  const { top, bottom } = span.getBoundingClientRect();
+  if (top < visibleTop || bottom > window.innerHeight) {
+    span.scrollIntoView({ block: "center" });
+  }
 }
 
 function startEditing(paragraph, block) {
@@ -283,6 +401,7 @@ function wordSpanOf(node) {
 function updateSelection() {
   const selection = window.getSelection();
   if (selection.isCollapsed || !selection.rangeCount) {
+    clearSelection();
     return;
   }
   const range = selection.getRangeAt(0);
@@ -338,4 +457,10 @@ $("paragraphs").addEventListener("mouseup", updateSelection);
 $("selection-assign").addEventListener("click", () => {
   reassign(currentSelection.firstWord, currentSelection.lastWord, $("selection-speaker").value);
 });
+$("audio").addEventListener("pause", rememberPausePosition);
+$("audio").addEventListener("play", rewindOnResume);
+$("audio").addEventListener("play", () => requestAnimationFrame(followWhilePlaying));
+$("audio").addEventListener("seeked", followPlayback);
+$("playback-rate").addEventListener("change", applyPlaybackRate);
+renderPlaybackRates();
 showStart().catch(reportStartError);

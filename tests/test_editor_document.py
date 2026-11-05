@@ -13,8 +13,16 @@ from run_fixtures import (
 
 from interview_local.artifacts import corrected_text
 from interview_local.core import Turn
-from interview_local.corrections import edit_paragraph_text, load_corrected_paragraphs
-from interview_local.editor_document import LOW_ASR_PROBABILITY, build_editor_document
+from interview_local.corrections import (
+    edit_paragraph_text,
+    load_corrected_paragraphs,
+    set_paragraph_checked,
+)
+from interview_local.editor_document import (
+    LONG_SILENCE_SECONDS,
+    LOW_ASR_PROBABILITY,
+    build_editor_document,
+)
 
 NAMES = {"A": "Anna", "B": "Bernd"}
 NO_CORRECTIONS = Path("/nonexistent-run")
@@ -30,7 +38,11 @@ class DocumentTests(unittest.TestCase):
         document = document_of(readable_transcript(TWO_PARAGRAPHS))
         self.assertEqual(
             {key: value for key, value in document.items() if key != "paragraphs"},
-            {"speakers": NAMES, "low_asr_probability": LOW_ASR_PROBABILITY},
+            {
+                "speakers": NAMES,
+                "low_asr_probability": LOW_ASR_PROBABILITY,
+                "long_silence_seconds": LONG_SILENCE_SECONDS,
+            },
         )
 
 
@@ -54,8 +66,19 @@ class ParagraphTests(unittest.TestCase):
                 "text": "Danke, gut. Und selbst?",
                 "text_edited": False,
                 "speaker_edited": False,
+                "checked": False,
                 "speaker_uncertainty": [],
             },
+        )
+
+    def test_checked_paragraph_carries_its_review_status(self):
+        readable = readable_transcript(TWO_PARAGRAPHS)
+        paragraphs = set_paragraph_checked(
+            load_corrected_paragraphs(NO_CORRECTIONS, readable), 4, True
+        )
+        self.assertEqual(
+            [p["checked"] for p in document_of(readable, paragraphs)["paragraphs"]],
+            [False, True],
         )
 
     def test_clean_paragraphs_have_no_speaker_uncertainty(self):
@@ -144,6 +167,7 @@ class WordTests(unittest.TestCase):
                 "original_text": "Tag",
                 "removed_before": "",
                 "low_asr_confidence": False,
+                "after_long_silence": False,
             },
         )
 
@@ -195,6 +219,58 @@ class WordTests(unittest.TestCase):
             del word["probability"]
         with self.assertRaises(ValueError):
             document_of(readable)
+
+
+def silence_before_second_paragraph(seconds):
+    """Interview words whose second paragraph (words 4-7) starts ``seconds`` after word 3 ends."""
+    source_words = interview_words()
+    shift = seconds - (source_words[4].start - source_words[3].end)
+    source_words[4:] = [
+        replace(w, start=w.start + shift, end=w.end + shift) for w in source_words[4:]
+    ]
+    return readable_transcript(TWO_PARAGRAPHS, words=source_words)
+
+
+class LongSilenceTests(unittest.TestCase):
+    def test_word_after_exactly_the_threshold_of_silence_is_marked(self):
+        readable = silence_before_second_paragraph(LONG_SILENCE_SECONDS)
+        words = document_of(readable)["paragraphs"][1]["words"]
+        self.assertEqual(
+            [w["after_long_silence"] for w in words], [True, False, False, False]
+        )
+
+    def test_word_after_slightly_shorter_silence_is_not_marked(self):
+        readable = silence_before_second_paragraph(LONG_SILENCE_SECONDS - 0.01)
+        words = document_of(readable)["paragraphs"][1]["words"]
+        self.assertEqual([w["after_long_silence"] for w in words], [False] * 4)
+
+    def test_inserted_word_after_a_long_silence_is_not_marked(self):
+        readable = silence_before_second_paragraph(LONG_SILENCE_SECONDS)
+        paragraphs = edit_paragraph_text(
+            load_corrected_paragraphs(NO_CORRECTIONS, readable),
+            4,
+            "Also Danke, gut. Und selbst?",
+        )
+        words = document_of(readable, paragraphs)["paragraphs"][1]["words"]
+        self.assertEqual(
+            [(w["text"], w["after_long_silence"]) for w in words[:2]],
+            [("Also", False), ("Danke,", True)],
+        )
+
+    def test_first_word_is_measured_from_the_audio_start(self):
+        source_words = [
+            replace(
+                w,
+                start=w.start + LONG_SILENCE_SECONDS,
+                end=w.end + LONG_SILENCE_SECONDS,
+            )
+            for w in interview_words()
+        ]
+        readable = readable_transcript(TWO_PARAGRAPHS, words=source_words)
+        words = document_of(readable)["paragraphs"][0]["words"]
+        self.assertEqual(
+            [w["after_long_silence"] for w in words], [True, False, False, False]
+        )
 
 
 def corrected_uncertain_document():

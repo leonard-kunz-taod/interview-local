@@ -27,6 +27,7 @@ from ..corrections import (
     readable_source_words,
     reassign_words,
     save_corrections,
+    set_paragraph_checked,
 )
 from ..editor_document import build_editor_document
 from .jobs import TranscriptionJob
@@ -342,6 +343,18 @@ class EditorRequestHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _set_checked(self, run_id: str, first_word: str) -> None:
+        checked = self._json_body().get("checked")
+        if type(checked) is not bool:
+            raise ValueError("The request needs a boolean checked value.")
+        self._update_corrections(
+            run_id,
+            lambda readable, paragraphs, speakers: (
+                set_paragraph_checked(paragraphs, int(first_word), checked),
+                speakers,
+            ),
+        )
+
     def _reassign(self, run_id: str) -> None:
         body = self._json_body()
         first_word, last_word, speaker = (
@@ -513,6 +526,11 @@ ROUTES = (
         "PUT",
         ("api", "runs", PARAMETER, "paragraphs", PARAMETER, "text"),
         EditorRequestHandler._edit_text,
+    ),
+    Route(
+        "PUT",
+        ("api", "runs", PARAMETER, "paragraphs", PARAMETER, "checked"),
+        EditorRequestHandler._set_checked,
     ),
     Route(
         "POST", ("api", "runs", PARAMETER, "reassign"), EditorRequestHandler._reassign

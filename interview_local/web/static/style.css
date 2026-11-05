@@ -1,3 +1,6 @@
+/* Author display rules such as #selection-bar { display: flex } would otherwise override the hidden attribute. */
+[hidden] { display: none !important; }
+
 body {
   font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
   margin: 0 auto;
@@ -52,6 +55,11 @@ form label {
   background: #fff6e6;
 }
 
+/* An inset bar beside the left border, so a checked paragraph still shows its speaker-uncertainty colours. */
+.paragraph.checked {
+  box-shadow: inset 4px 0 0 #3c9a5f;
+}
+
 .speaker-reasons {
   color: #8a5300;
   font-size: 0.9em;
@@ -68,6 +76,16 @@ form label {
 
 .low-asr-confidence {
   text-decoration: underline wavy #c00;
+}
+
+.after-long-silence {
+  border-top: 2px dashed #8e44ad;
+}
+
+/* An outline rather than a background, so the word keeps its change and recognition markers while it plays. */
+.playing-word {
+  outline: 3px solid #e0a800;
+  outline-offset: 1px;
 }
 
 .original,

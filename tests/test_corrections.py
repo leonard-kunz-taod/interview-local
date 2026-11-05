@@ -1,16 +1,20 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from run_fixtures import TWO_PARAGRAPHS, readable_transcript, reassign
 
 from interview_local.corrections import (
+    CORRECTIONS_SCHEMA_VERSION,
+    LEGACY_SCHEMA_VERSION,
     CorrectedParagraph,
     edit_paragraph_text,
     load_corrected_paragraphs,
     load_speaker_names,
     save_corrections,
+    set_paragraph_checked,
 )
 
 
@@ -35,8 +39,12 @@ class LoadAndSaveTests(unittest.TestCase):
         self.assertEqual(
             paragraphs,
             [
-                CorrectedParagraph(0, 3, "A", "Guten Tag, wie geht's?", False, False),
-                CorrectedParagraph(4, 7, "B", "Danke, gut. Und selbst?", False, False),
+                CorrectedParagraph(
+                    0, 3, "A", "Guten Tag, wie geht's?", False, False, False
+                ),
+                CorrectedParagraph(
+                    4, 7, "B", "Danke, gut. Und selbst?", False, False, False
+                ),
             ],
         )
 
@@ -157,8 +165,8 @@ class LoadAndSaveTests(unittest.TestCase):
 
     def test_saving_an_unknown_speaker_is_rejected(self):
         paragraphs = [
-            CorrectedParagraph(0, 3, "C", "Guten Tag", False, True),
-            CorrectedParagraph(4, 7, "B", "Danke", False, False),
+            CorrectedParagraph(0, 3, "C", "Guten Tag", False, True, False),
+            CorrectedParagraph(4, 7, "B", "Danke", False, False, False),
         ]
         with self.assertRaisesRegex(ValueError, "Unknown speaker"):
             save_corrections(
@@ -167,8 +175,8 @@ class LoadAndSaveTests(unittest.TestCase):
 
     def test_saving_an_unassigned_paragraph_is_accepted(self):
         paragraphs = [
-            CorrectedParagraph(0, 3, None, "Guten Tag", False, True),
-            CorrectedParagraph(4, 7, "B", "Danke", False, False),
+            CorrectedParagraph(0, 3, None, "Guten Tag", False, True, False),
+            CorrectedParagraph(4, 7, "B", "Danke", False, False, False),
         ]
         save_corrections(
             self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, paragraphs
@@ -179,8 +187,8 @@ class LoadAndSaveTests(unittest.TestCase):
 
     def test_saving_a_paragraph_without_words_is_rejected(self):
         paragraphs = [
-            CorrectedParagraph(0, 3, "A", "–", True, False),
-            CorrectedParagraph(4, 7, "B", "Danke", False, False),
+            CorrectedParagraph(0, 3, "A", "–", True, False, False),
+            CorrectedParagraph(4, 7, "B", "Danke", False, False, False),
         ]
         with self.assertRaisesRegex(ValueError, "no words"):
             save_corrections(
@@ -189,8 +197,8 @@ class LoadAndSaveTests(unittest.TestCase):
 
     def test_saving_a_reversed_word_range_is_rejected(self):
         paragraphs = [
-            CorrectedParagraph(0, -1, "A", "Guten", False, False),
-            CorrectedParagraph(0, 7, "B", "Danke", False, False),
+            CorrectedParagraph(0, -1, "A", "Guten", False, False, False),
+            CorrectedParagraph(0, 7, "B", "Danke", False, False, False),
         ]
         with self.assertRaisesRegex(ValueError, "exactly once in order"):
             save_corrections(
@@ -217,6 +225,23 @@ class LoadAndSaveTests(unittest.TestCase):
             load_speaker_names(self.run_dir, self.readable), {"A": "Anna", "B": "Bernd"}
         )
 
+    def test_corrections_file_of_an_unknown_schema_version_is_rejected(self):
+        save_corrections(
+            self.run_dir,
+            self.readable,
+            {"A": "Anna", "B": "Bernd"},
+            load_corrected_paragraphs(self.run_dir, self.readable),
+        )
+        path = self.run_dir / "corrections.json"
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        for version in (0, 3, 99):
+            with self.subTest(version=version):
+                path.write_text(
+                    json.dumps(dict(stored, schema_version=version)), encoding="utf-8"
+                )
+                with self.assertRaises(ValueError):
+                    load_corrected_paragraphs(self.run_dir, self.readable)
+
     def test_saving_writes_only_corrections_json(self):
         save_corrections(
             self.run_dir,
@@ -227,11 +252,98 @@ class LoadAndSaveTests(unittest.TestCase):
         self.assertEqual([p.name for p in self.run_dir.iterdir()], ["corrections.json"])
 
 
+def write_legacy_corrections(run_dir, readable, paragraphs):
+    """A corrections.json as written before paragraphs had a review status."""
+    save_corrections(run_dir, readable, {"A": "Anna", "B": "Bernd"}, paragraphs)
+    path = run_dir / "corrections.json"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    for paragraph in stored["paragraphs"]:
+        del paragraph["checked"]
+    path.write_text(
+        json.dumps(dict(stored, schema_version=LEGACY_SCHEMA_VERSION)),
+        encoding="utf-8",
+    )
+
+
+class ReviewStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.run_dir = Path(self.directory.name)
+        self.readable = readable_transcript(TWO_PARAGRAPHS)
+        self.paragraphs = load_corrected_paragraphs(self.run_dir, self.readable)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_paragraphs_of_the_readable_transcript_are_unchecked(self):
+        self.assertEqual([p.checked for p in self.paragraphs], [False, False])
+
+    def test_checked_status_loads_again(self):
+        checked = set_paragraph_checked(self.paragraphs, 4, True)
+        save_corrections(
+            self.run_dir, self.readable, {"A": "Anna", "B": "Bernd"}, checked
+        )
+        self.assertEqual(
+            [p.checked for p in load_corrected_paragraphs(self.run_dir, self.readable)],
+            [False, True],
+        )
+
+    def test_checked_paragraph_can_be_unchecked(self):
+        checked = set_paragraph_checked(self.paragraphs, 4, True)
+        self.assertEqual(
+            [p.checked for p in set_paragraph_checked(checked, 4, False)],
+            [False, False],
+        )
+
+    def test_checking_changes_nothing_but_the_status(self):
+        checked = set_paragraph_checked(self.paragraphs, 0, True)
+        self.assertEqual(checked[0], replace(self.paragraphs[0], checked=True))
+
+    def test_checking_an_unknown_paragraph_is_rejected(self):
+        with self.assertRaises(ValueError):
+            set_paragraph_checked(self.paragraphs, 2, True)
+
+    def test_legacy_corrections_load_with_nothing_checked(self):
+        write_legacy_corrections(
+            self.run_dir,
+            self.readable,
+            set_paragraph_checked(self.paragraphs, 4, True),
+        )
+        self.assertEqual(
+            [p.checked for p in load_corrected_paragraphs(self.run_dir, self.readable)],
+            [False, False],
+        )
+
+    def test_legacy_corrections_keep_their_edits(self):
+        edited = edit_paragraph_text(self.paragraphs, 4, "Danke, sehr gut.")
+        write_legacy_corrections(self.run_dir, self.readable, edited)
+        self.assertEqual(
+            load_corrected_paragraphs(self.run_dir, self.readable),
+            [replace(p, checked=False) for p in edited],
+        )
+
+    def test_legacy_corrections_are_saved_in_the_current_schema(self):
+        write_legacy_corrections(self.run_dir, self.readable, self.paragraphs)
+        save_corrections(
+            self.run_dir,
+            self.readable,
+            {"A": "Anna", "B": "Bernd"},
+            load_corrected_paragraphs(self.run_dir, self.readable),
+        )
+        stored = json.loads(
+            (self.run_dir / "corrections.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            (stored["schema_version"], [p["checked"] for p in stored["paragraphs"]]),
+            (CORRECTIONS_SCHEMA_VERSION, [False, False]),
+        )
+
+
 class EditTextTests(unittest.TestCase):
     def setUp(self):
         self.paragraphs = [
-            CorrectedParagraph(0, 3, "A", "Guten Tag", False, False),
-            CorrectedParagraph(4, 7, "B", "Danke", False, False),
+            CorrectedParagraph(0, 3, "A", "Guten Tag", False, False, False),
+            CorrectedParagraph(4, 7, "B", "Danke", False, False, False),
         ]
 
     def test_edit_replaces_only_that_text_and_marks_it_edited(self):
@@ -240,7 +352,7 @@ class EditTextTests(unittest.TestCase):
             edited,
             [
                 self.paragraphs[0],
-                CorrectedParagraph(4, 7, "B", "Danke schön", True, False),
+                CorrectedParagraph(4, 7, "B", "Danke schön", True, False, True),
             ],
         )
 
@@ -249,10 +361,14 @@ class EditTextTests(unittest.TestCase):
         self.assertEqual(
             edited,
             [
-                CorrectedParagraph(0, 3, "A", "Guten Morgen", True, False),
+                CorrectedParagraph(0, 3, "A", "Guten Morgen", True, False, True),
                 self.paragraphs[1],
             ],
         )
+
+    def test_edited_paragraph_counts_as_checked(self):
+        edited = edit_paragraph_text(self.paragraphs, 4, "Danke schön")
+        self.assertEqual([p.checked for p in edited], [False, True])
 
     def test_empty_text_is_rejected(self):
         for text in ("", "   ", " – ?"):
@@ -291,6 +407,19 @@ class ReassignTests(unittest.TestCase):
                 (4, 7, "B", "Danke, gut. Und selbst?", False),
             ],
         )
+
+    def test_every_part_of_a_split_paragraph_counts_as_checked(self):
+        result = reassign(self.readable, self.paragraphs, 5, 6, "A")
+        self.assertEqual([p.checked for p in result], [False, True, True, True])
+
+    def test_reassigned_whole_paragraph_counts_as_checked(self):
+        result = reassign(self.readable, self.paragraphs, 0, 3, "B")
+        self.assertEqual([p.checked for p in result], [True, False])
+
+    def test_checked_paragraph_outside_the_selection_stays_checked(self):
+        paragraphs = set_paragraph_checked(self.paragraphs, 0, True)
+        result = reassign(self.readable, paragraphs, 5, 6, "A")
+        self.assertEqual(result[0].checked, True)
 
     def test_selection_across_paragraphs_is_rejected(self):
         with self.assertRaises(ValueError):

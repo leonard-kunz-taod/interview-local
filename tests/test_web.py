@@ -627,6 +627,65 @@ class EditorApiTests(unittest.TestCase):
                 )
                 self.assertEqual(download, (200, True, first_line, True))
 
+    def test_checked_status_is_saved_and_reloaded(self):
+        status, _, _ = send_json(
+            self.server,
+            "PUT",
+            f"/api/runs/{RUN_ID}/paragraphs/4/checked",
+            {"checked": True},
+        )
+        reloaded = [p["checked"] for p in self.document()["paragraphs"]]
+        self.assertEqual((status, reloaded), (200, [False, True]))
+
+    def test_checked_value_that_is_no_boolean_is_rejected(self):
+        for value in (1, "true", None):
+            with self.subTest(value=value):
+                status, _, _ = send_json(
+                    self.server,
+                    "PUT",
+                    f"/api/runs/{RUN_ID}/paragraphs/4/checked",
+                    {"checked": value},
+                )
+                self.assertEqual(status, 400)
+
+    def test_checking_an_unknown_paragraph_is_rejected(self):
+        status, _, _ = send_json(
+            self.server,
+            "PUT",
+            f"/api/runs/{RUN_ID}/paragraphs/2/checked",
+            {"checked": True},
+        )
+        self.assertEqual(status, 400)
+
+    def test_stage_files_stay_unchanged_after_checking(self):
+        before = stage_file_contents(self.run_dir)
+        send_json(
+            self.server,
+            "PUT",
+            f"/api/runs/{RUN_ID}/paragraphs/4/checked",
+            {"checked": True},
+        )
+        self.assertEqual(stage_file_contents(self.run_dir), before)
+
+    def test_exports_are_unchanged_by_checking(self):
+        exports = ("export.md", "export.txt")
+        before = [
+            exchange(self.server, "GET", f"/api/runs/{RUN_ID}/{export}")[2]
+            for export in exports
+        ]
+        for first_word in (0, 4):
+            send_json(
+                self.server,
+                "PUT",
+                f"/api/runs/{RUN_ID}/paragraphs/{first_word}/checked",
+                {"checked": True},
+            )
+        after = [
+            exchange(self.server, "GET", f"/api/runs/{RUN_ID}/{export}")[2]
+            for export in exports
+        ]
+        self.assertEqual(after, before)
+
     def test_audio_range_request_returns_partial_content(self):
         status, response, body = exchange(
             self.server,

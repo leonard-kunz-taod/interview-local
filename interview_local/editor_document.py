@@ -6,6 +6,8 @@ from .corrections import CorrectedParagraph, readable_source_words
 from .word_alignment import DisplayWord, align_text_to_source
 
 LOW_ASR_PROBABILITY = 0.5
+LONG_SILENCE_SECONDS = 5.0
+AUDIO_START_SECONDS = 0.0
 SPEAKER_UNCERTAINTY_REASONS = frozenset(
     {"overlapping_speech", "ambiguous_speaker_boundary", "no_matching_speaker"}
 )
@@ -32,6 +34,7 @@ def build_editor_document(
     return {
         "speakers": dict(speakers),
         "low_asr_probability": LOW_ASR_PROBABILITY,
+        "long_silence_seconds": LONG_SILENCE_SECONDS,
         "paragraphs": [
             _editor_paragraph(readable["paragraphs"], words, p, speakers)
             for p in paragraphs
@@ -60,6 +63,7 @@ def _editor_paragraph(
         "text": paragraph.text,
         "text_edited": paragraph.text_edited,
         "speaker_edited": paragraph.speaker_edited,
+        "checked": paragraph.checked,
         "speaker_uncertainty": speaker_uncertainty(
             readable_paragraphs, paragraph_words, paragraph
         ),
@@ -138,6 +142,7 @@ def _editor_word(word: DisplayWord, words: list[dict], seek_time: float) -> dict
         "original_text": word.original_text,
         "removed_before": word.removed_before,
         "low_asr_confidence": low_asr_confidence(sources),
+        "after_long_silence": after_long_silence(word.source_word_ids, words),
     }
 
 
@@ -151,3 +156,18 @@ def low_asr_confidence(sources: list[dict]) -> bool:
         w["probability"] is None or w["probability"] < LOW_ASR_PROBABILITY
         for w in sources
     )
+
+
+def after_long_silence(source_word_ids: tuple[int, ...], words: list[dict]) -> bool:
+    """Whether at least LONG_SILENCE_SECONDS of silence precede this word.
+
+    Whisper tends to invent text in long silences. The silence is acoustic, so
+    it is measured from the previous source word in the whole recording (for the
+    first word from the audio start). An inserted word has no audio of its own
+    and is never marked.
+    """
+    if not source_word_ids:
+        return False
+    first = source_word_ids[0]
+    previous_end = words[first - 1]["end"] if first > 0 else AUDIO_START_SECONDS
+    return words[first]["start"] - previous_end >= LONG_SILENCE_SECONDS
