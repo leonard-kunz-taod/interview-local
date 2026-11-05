@@ -9,6 +9,8 @@ requires-python = ">=3.11,<3.13"
 dependencies = ["onnxruntime>=1.20,<2", "psutil>=6,<8", "av>=14,<19", "soundfile>=0.13,<1", "numpy>=2,<3", "faster-whisper>=1.2,<2", "pyannote.audio>=4,<5", "whisperx>=3.7,<3.9", "torch>=2.8,<2.9", "torchcodec>=0.7,<0.8", "torchaudio>=2.8,<2.9", "transformers>=4.48,<5", "huggingface-hub>=0.34,<1"]
 [project.scripts]
 interview-local = "interview_local.cli:main"
+[dependency-groups]
+eval = ["mlflow-skinny>=3.18,<4", "sqlalchemy>=2", "alembic>=1.13"]
 [tool.setuptools.packages.find]
 include = ["interview_local*"]
 [tool.setuptools.package-data]
@@ -19,7 +21,7 @@ include = ["interview_local*"]
 extend-exclude = [".claude"]
 
 [tool.mutmut]
-source_paths = ["interview_local/"]
+source_paths = ["interview_local/", "benchmark/"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Run ad hoc, outside the project environment:
 #   uv run --no-sync --with mutmut --with pytest mutmut run "<glob>"

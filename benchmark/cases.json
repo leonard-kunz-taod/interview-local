@@ -1,0 +1,12 @@
+[
+  {
+    "name": "callhome-de-sample",
+    "speakers": "test_data/callhome/02_speakers.json",
+    "speakers_sha256": "59b1c59e65e07d173490b16fd96489be56908c92e54a7915dbc89fc7480d05b0",
+    "reference": "test_data/callhome/sample.tsv",
+    "reference_sha256": "c55d622648be2fb0432d63395d7ac94210f172b869824e685643ccd2ca37d753",
+    "offset": 119,
+    "start": 0.71,
+    "end": 103.22
+  }
+]
