@@ -36,7 +36,7 @@ Every run gets a new directory under `transcripts/`. Existing nonempty output di
 | `03_readable.txt`, `03_readable.md`, `03_readable.json` | Human-readable LLM draft with speaker paragraphs and time ranges. JSON is an audit artifact, not the main reading format. |
 | `04_review.txt`, `04_review.md`, `04_review.json` | Separately requested consistency comparison against the embedded source, with paragraph uncertainty labels and reasons. |
 | `source.wav` / `source.mp3` / `source.m4a` | Web UI runs only: the stored copy of the uploaded recording, used for playback in the editor. |
-| `corrections.json` | Web UI runs only: your manual corrections (paragraph text, speaker assignment, speaker names). The stage files above stay unchanged. |
+| `corrections.json` | Web UI runs only: your manual corrections (paragraph text, speaker assignment, speaker names) and which paragraphs you have checked. The stage files above stay unchanged. Files saved before the checked status existed open with no paragraph checked. |
 
 Every word in `01_raw.json` and `02_speakers.json` stores Whisper's word `probability` (0–1). Words without a corresponding Whisper word — whole-segment fallback text and words from the optional `--align` path — store `probability: null`.
 
@@ -125,10 +125,11 @@ Alignment stays opt-in (`--align`): on the original telephone test it worsened s
 The server listens on `127.0.0.1` with a random free port, prints its URL and opens it in the browser. It is not reachable from other machines and rejects requests that do not address `127.0.0.1:<port>` or `localhost:<port>`. Press Ctrl+C in the terminal to stop it.
 
 - **New transcription:** choose a WAV, MP3 or M4A file and enter both speaker names. The recording is copied into a new run directory as `source.<ext>`. The page shows the running step (speech recognition, speaker recognition, LLM) and any error. One transcription runs at a time and cannot be cancelled from the browser. Ollama must be running with Ministral prepared. Speaker recognition needs the local `models/community-1` folder, `HF_TOKEN` or a cached `hf auth login`; the web UI never asks for a token. The web flow does not use `--align`.
-- **Editor:** paragraphs with speaker name and time range. Blue words differ from the speech recognition output (hover for the original word, or tick “Show original words”); words with a wavy red underline have a Whisper word probability below 0.5 or none at all. Orange paragraphs need a speaker check: simultaneous speech, unclear speaker boundary, no speaker match, unassigned, or speaker changed by the LLM. Assigning a paragraph manually clears this highlight.
+- **Editor:** paragraphs with speaker name and time range. Blue words differ from the speech recognition output (hover for the original word, or tick “Show original words”); words with a wavy red underline have a Whisper word probability below 0.5 or none at all. Words with a dashed purple line above them follow at least 5 seconds of silence and are possibly invented text: Whisper tends to hallucinate in long silences. Orange paragraphs need a speaker check: simultaneous speech, unclear speaker boundary, no speaker match, unassigned, or speaker changed by the LLM. Assigning a paragraph manually clears this highlight.
 - **Corrections:** “Edit” turns a paragraph into a text field. Select words and use “Assign selection”, or “Assign paragraph”, to give text to a speaker; the paragraph is split accordingly. “Swap names” exchanges the two speaker names. Corrections are saved immediately to `corrections.json`; reopening the run from the start page shows them again.
-- **Audio:** click a word to play the recording from that word.
-- **Export:** “Export .md” / “Export .txt” download the corrected transcript.
+- **Review status:** tick “checked” in a paragraph's header once you have reviewed it; the toolbar shows “x of n paragraphs checked”. Editing a paragraph's text, “Assign paragraph” and “Assign selection” mark the resulting paragraphs as checked; untick to undo. The status is saved in `corrections.json`.
+- **Audio:** click a word to play the recording from that word. Resuming after a pause starts 2 seconds earlier. “Speed” sets playback to 0.75×, 1×, 1.25× or 1.5×. The word being spoken is outlined, and the editor scrolls to follow it unless a paragraph is open for editing.
+- **Export:** “Export .md” / “Export .txt” download the corrected transcript, without review marks or checked status.
 
 Only runs started from the web UI can be opened in the editor: older runs have no stored audio copy and no word probabilities. If `03_readable.json` of a run changes after corrections were saved, the editor refuses to open it rather than misapplying them.
 

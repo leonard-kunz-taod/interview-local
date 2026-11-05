@@ -11,9 +11,13 @@ from .llm import fingerprint, source_words, tokens
 from .word_alignment import DisplayWord, align_text_to_source
 
 CORRECTIONS_FILENAME = "corrections.json"
-CORRECTIONS_SCHEMA_VERSION = 1
+CORRECTIONS_SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 COVERAGE_MESSAGE = (
     "Corrected paragraphs do not cover the source words exactly once in order."
+)
+_SUPPORTED_SCHEMA_VERSIONS = frozenset(
+    {LEGACY_SCHEMA_VERSION, CORRECTIONS_SCHEMA_VERSION}
 )
 
 
@@ -27,6 +31,7 @@ class CorrectedParagraph:
     text: str
     text_edited: bool
     speaker_edited: bool
+    checked: bool
 
 
 def readable_source_words(readable: dict) -> list[dict]:
@@ -47,7 +52,7 @@ def load_corrected_paragraphs(
     if stored is None:
         paragraphs = [_paragraph_from_readable(p) for p in readable["paragraphs"]]
     else:
-        paragraphs = [CorrectedParagraph(**p) for p in stored["paragraphs"]]
+        paragraphs = _stored_paragraphs(stored)
     validate_coverage(paragraphs, readable)
     return paragraphs
 
@@ -78,10 +83,21 @@ def _stored_corrections(run_dir: Path, readable: dict) -> dict | None:
 
 def _require_supported_format(stored: dict, path: Path) -> None:
     if (
-        stored.get("schema_version") != CORRECTIONS_SCHEMA_VERSION
+        stored.get("schema_version") not in _SUPPORTED_SCHEMA_VERSIONS
         or stored.get("stage") != "corrections"
     ):
         raise ValueError(f"{path} is not a supported corrections file.")
+
+
+def _stored_paragraphs(stored: dict) -> list[CorrectedParagraph]:
+    if stored["schema_version"] == LEGACY_SCHEMA_VERSION:
+        return [_paragraph_from_legacy(p) for p in stored["paragraphs"]]
+    return [CorrectedParagraph(**p) for p in stored["paragraphs"]]
+
+
+def _paragraph_from_legacy(paragraph: dict) -> CorrectedParagraph:
+    """Business rule: files written before review status existed have nothing checked."""
+    return CorrectedParagraph(**paragraph, checked=False)
 
 
 def _paragraph_from_readable(paragraph: dict) -> CorrectedParagraph:
@@ -97,6 +113,7 @@ def _paragraph_from_readable(paragraph: dict) -> CorrectedParagraph:
         text=paragraph["text"],
         text_edited=False,
         speaker_edited=False,
+        checked=False,
     )
 
 
@@ -150,16 +167,36 @@ def _is_usable_name(name: str) -> bool:
 def edit_paragraph_text(
     paragraphs: list[CorrectedParagraph], first_word: int, text: str
 ) -> list[CorrectedParagraph]:
-    """Replace the text of the paragraph starting at first_word; returns a new list.
+    """Replace the text of the paragraph starting at first_word and mark it checked; returns a new list.
 
     Raises:
         ValueError: If no paragraph starts at first_word or the text has no words.
     """
     if not tokens(text):
         raise ValueError("The paragraph text must contain at least one word.")
+    return _with_paragraph_changed(
+        paragraphs, first_word, text=text.strip(), text_edited=True, checked=True
+    )
+
+
+def set_paragraph_checked(
+    paragraphs: list[CorrectedParagraph], first_word: int, checked: bool
+) -> list[CorrectedParagraph]:
+    """Set the review status of the paragraph starting at first_word; returns a new list.
+
+    Raises:
+        ValueError: If no paragraph starts at first_word.
+    """
+    return _with_paragraph_changed(paragraphs, first_word, checked=checked)
+
+
+def _with_paragraph_changed(
+    paragraphs: list[CorrectedParagraph], first_word: int, **changes: object
+) -> list[CorrectedParagraph]:
+    """A new list in which the paragraph starting at first_word has the given field values."""
     position = _paragraph_position(paragraphs, first_word)
-    edited = replace(paragraphs[position], text=text.strip(), text_edited=True)
-    return paragraphs[:position] + [edited] + paragraphs[position + 1 :]
+    changed = replace(paragraphs[position], **changes)
+    return paragraphs[:position] + [changed] + paragraphs[position + 1 :]
 
 
 def _paragraph_position(paragraphs: list[CorrectedParagraph], first_word: int) -> int:
@@ -182,6 +219,7 @@ def reassign_words(
     The paragraph splits into up to three. The range widens outward to whole display words; inserted display words go
     with their preceding source word. A range part without any display word is
     absorbed into the reassigned part. Neighbours with the same speaker are not merged.
+    Every resulting part counts as checked; the other paragraphs keep their status.
 
     Returns a new paragraph list.
 
@@ -207,6 +245,7 @@ def reassign_words(
             text=_text_within(display_words, anchors, low, high),
             text_edited=paragraph.text_edited,
             speaker_edited=speaker_edited,
+            checked=True,
         )
         for low, high, part_speaker, speaker_edited in _split_parts(
             paragraph, begin, end, speaker

@@ -49,10 +49,12 @@
       <div id="editor-toolbar">
         <button id="editor-back" type="button">Back to start</button>
         <audio id="audio" controls preload="metadata"></audio>
+        <label>Speed <select id="playback-rate"></select></label>
         <button id="swap-names" type="button">Swap names</button>
         <label><input id="show-originals" type="checkbox"> Show original words</label>
         <a id="export-md" download>Export .md</a>
         <a id="export-txt" download>Export .txt</a>
+        <span id="review-progress"></span>
       </div>
       <div id="selection-bar" hidden>
         <span id="selection-label"></span>
@@ -64,6 +66,7 @@
         <span class="llm-changed">changed by LLM</span>
         <span class="low-asr-confidence">uncertain recognition</span>
         <span class="speaker-uncertain-sample">uncertain speaker</span>
+        <span class="after-long-silence">possibly invented text</span>
       </div>
       <div id="paragraphs"></div>
     </section>
