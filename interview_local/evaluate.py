@@ -236,7 +236,6 @@ def _timed_display_words(paragraph: dict, selected: list[dict]) -> list[dict]:
 
 
 def _segment_words(raw: dict) -> list[dict]:
-    """The words of a raw transcript's segments."""
     return [w for s in raw["segments"] for w in s["words"]]
 
 
