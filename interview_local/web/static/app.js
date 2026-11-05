@@ -140,6 +140,7 @@ function renderPhase(job) {
 
 async function openRun(runId) {
   const loaded = await api(`/api/runs/${encodeURIComponent(runId)}/document`);
+  forgetPausePosition();
   $("audio").src = `/api/runs/${encodeURIComponent(runId)}/audio`;
   $("export-md").href = `/api/runs/${encodeURIComponent(runId)}/export.md`;
   $("export-txt").href = `/api/runs/${encodeURIComponent(runId)}/export.txt`;
@@ -286,6 +287,7 @@ function seek(seconds) {
     return;
   }
   const audio = $("audio");
+  forgetPausePosition();
   audio.currentTime = seconds;
   audio.play().catch((error) => showError($("editor-error"), `Playback failed: ${error.message}`));
 }
@@ -296,10 +298,14 @@ function rememberPausePosition() {
 }
 
 function rewindOnResume() {
-  const audio = $("audio");
-  if (audio.currentTime === pausedAt) {
-    audio.currentTime = Math.max(0, pausedAt - RESUME_REWIND_SECONDS);
+  if (pausedAt === null) {
+    return;
   }
+  $("audio").currentTime = Math.max(0, pausedAt - RESUME_REWIND_SECONDS);
+  forgetPausePosition();
+}
+
+function forgetPausePosition() {
   pausedAt = null;
 }
 
@@ -398,6 +404,13 @@ function wordSpanOf(node) {
   return element ? element.closest(".word") : null;
 }
 
+function updateSelectionUnlessInSelectionBar(event) {
+  if ($("selection-bar").contains(event.target)) {
+    return;
+  }
+  updateSelection();
+}
+
 function updateSelection() {
   const selection = window.getSelection();
   if (selection.isCollapsed) {
@@ -409,6 +422,7 @@ function updateSelection() {
   const spans = [...$("paragraphs").querySelectorAll(".word")].filter((span) => range.intersectsNode(span));
   const sourceIds = spans.flatMap((span) => span.dataset.sourceIds.split(",").filter(Boolean).map(Number));
   if (!spans.length) {
+    clearSelection();
     return;
   }
   if (!block || spans.some((span) => span.closest(".paragraph") !== block)) {
@@ -453,11 +467,12 @@ $("progress-back").addEventListener("click", () => showStart());
 $("editor-back").addEventListener("click", () => showStart());
 $("swap-names").addEventListener("click", swapNames);
 $("show-originals").addEventListener("change", () => renderDocument(currentDocument));
-$("paragraphs").addEventListener("mouseup", updateSelection);
+document.addEventListener("mouseup", updateSelectionUnlessInSelectionBar);
 $("selection-assign").addEventListener("click", () => {
   reassign(currentSelection.firstWord, currentSelection.lastWord, $("selection-speaker").value);
 });
 $("audio").addEventListener("pause", rememberPausePosition);
+$("audio").addEventListener("seeking", forgetPausePosition);
 $("audio").addEventListener("play", rewindOnResume);
 $("audio").addEventListener("play", () => requestAnimationFrame(followWhilePlaying));
 $("audio").addEventListener("seeked", followPlayback);
