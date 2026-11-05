@@ -1,12 +1,14 @@
 import ast
+import functools
 import hashlib
+import io
 import json
 import os
 import sys
 import tempfile
 import tomllib
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +19,8 @@ from benchmark import iterate
 from interview_local import llm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The span type mlflow.trace records when the caller names none.
+DEFAULT_SPAN_TYPE = "UNKNOWN"
 STAGE2 = {"stage": "speakers", "speakers": {"A": "Speaker A"}, "words": []}
 METRICS = {
     "wer_stage2": 0.2544,
@@ -71,6 +75,14 @@ CORRECTED_STAGE3 = {
         {"speaker": "B", "text": "Hallo Welt", "source_word_ids": [2, 3]},
     ],
 }
+MISHEARD_STAGE2 = {
+    **MISATTRIBUTED_STAGE2,
+    "words": [
+        dict(word, text="Tach") if word["text"] == "Tag" else word
+        for word in MISATTRIBUTED_STAGE2["words"]
+    ],
+}
+REHEARD_STAGE3 = {**CORRECTED_STAGE3, "source_transcript": MISHEARD_STAGE2}
 
 
 @contextmanager
@@ -101,6 +113,17 @@ class LocalRunStore(ModuleType):
         self.tracking_uri = None
         self.experiments = {}
         self.experiment_id = None
+        self.spans = []
+
+    def trace(self, func, span_type=DEFAULT_SPAN_TYPE):
+        """Records every call of func as a span of its name and type."""
+
+        @functools.wraps(func)
+        def traced(*args, **kwargs):
+            self.spans.append((func.__name__, span_type))
+            return func(*args, **kwargs)
+
+        return traced
 
     def set_tracking_uri(self, uri):
         self.tracking_uri = uri
@@ -186,6 +209,37 @@ class CachedInputTests(unittest.TestCase):
         _, message = self.aborted(content, None, sha256(content))
         self.assertIn(iterate.FETCH_REFERENCE, message)
 
+    def test_case_entries_are_read_with_paths_under_the_repository_root(self):
+        entry = {
+            "name": "case",
+            "speakers": "cache/02_speakers.json",
+            "speakers_sha256": sha256(b"stage 2"),
+            "reference": "cache/sample.tsv",
+            "reference_sha256": sha256(b"reference"),
+            "offset": 119,
+            "start": 0.71,
+            "end": 103.22,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            cases_file = Path(directory) / "cases.json"
+            cases_file.write_text(json.dumps([entry]))
+            cases = iterate.load_cases(cases_file)
+        self.assertEqual(
+            cases,
+            [
+                iterate.BenchmarkCase(
+                    name=entry["name"],
+                    speakers=REPO_ROOT / entry["speakers"],
+                    speakers_sha256=entry["speakers_sha256"],
+                    reference=REPO_ROOT / entry["reference"],
+                    reference_sha256=entry["reference_sha256"],
+                    offset=entry["offset"],
+                    start=entry["start"],
+                    end=entry["end"],
+                )
+            ],
+        )
+
     def test_committed_case_paths_are_read_from_the_repository_root(self):
         case = iterate.load_cases(REPO_ROOT / "benchmark" / "cases.json")[0]
         self.assertEqual(
@@ -224,6 +278,19 @@ class RunSummaryTests(unittest.TestCase):
                 "cpwer_stage3": 0.0,
                 "cpwer_delta": -0.5,
             },
+        )
+
+    def test_corrected_wording_lowers_stage_three_wer_by_the_delta(self):
+        with reference_case() as case:
+            comparison = iterate.stage_comparison(case, MISHEARD_STAGE2, REHEARD_STAGE3)
+        one_of_four_words_misheard = 0.25
+        self.assertEqual(
+            (
+                comparison["wer_stage2"],
+                comparison["wer_stage3"],
+                comparison["wer_delta"],
+            ),
+            (one_of_four_words_misheard, 0.0, -one_of_four_words_misheard),
         )
 
     def test_case_is_logged_as_one_run_with_its_parameters_and_metrics(self):
@@ -270,13 +337,23 @@ class RunSummaryTests(unittest.TestCase):
             ],
         )
 
+    def test_column_headings_are_right_aligned_over_their_values(self):
+        heading, wer = iterate.format_table(METRICS).splitlines()[:2]
+        heading_ends = [
+            heading.index(cell) + len(cell) for cell in ("stage 2", "stage 3", "delta")
+        ]
+        value_ends = [
+            wer.index(cell) + len(cell) for cell in ("0.2544", "0.2500", "-0.0044")
+        ]
+        self.assertEqual(heading_ends, value_ends)
+
     def test_run_parameters_identify_prompt_decoding_and_model(self):
-        case = iterate.load_cases(REPO_ROOT / "benchmark" / "cases.json")[0]
-        params = iterate.run_params(case, DIGEST)
+        with reference_case() as case:
+            params = iterate.run_params(case, DIGEST)
         self.assertEqual(
             params,
             {
-                "case": "callhome-de-sample",
+                "case": case.name,
                 "speakers_sha256": case.speakers_sha256,
                 "prompt_sha256": sha256(llm.EDIT_PROMPT.encode("utf-8")),
                 "schema_sha256": llm.fingerprint(llm.MODEL_SCHEMA),
@@ -290,11 +367,25 @@ class RunSummaryTests(unittest.TestCase):
 
 
 @contextmanager
+def imported_as_mlflow(store):
+    """``import mlflow`` yields the store.
+
+    Unlike patch.dict, leaves loaded every module imported meanwhile: numpy
+    cannot be imported a second time in one process.
+    """
+    sys.modules["mlflow"] = store
+    try:
+        yield
+    finally:
+        del sys.modules["mlflow"]
+
+
+@contextmanager
 def local_tracking(store):
     """The store stands in for mlflow, tracking into a temporary .mlflow/."""
     with (
         tempfile.TemporaryDirectory() as directory,
-        patch.dict(sys.modules, {"mlflow": store}),
+        imported_as_mlflow(store),
         patch.dict(os.environ),
         patch.object(iterate, "MLFLOW_DIR", Path(directory) / ".mlflow"),
     ):
@@ -324,6 +415,15 @@ class LocalTrackingTests(unittest.TestCase):
             ((mlflow_dir / "artifacts").as_posix(), experiment.experiment_id),
         )
 
+    def test_existing_mlflow_directory_is_tracked_into(self):
+        store = LocalRunStore()
+        with local_tracking(store) as mlflow_dir:
+            mlflow_dir.mkdir()
+            iterate._local_mlflow()
+        self.assertEqual(
+            store.tracking_uri, f"sqlite:///{(mlflow_dir / 'mlflow.db').as_posix()}"
+        )
+
     def test_existing_experiment_is_reused(self):
         store = LocalRunStore()
         existing = SimpleNamespace(experiment_id="7", artifact_location="kept")
@@ -349,6 +449,76 @@ class LocalTrackingTests(unittest.TestCase):
         with local_tracking(store):
             configured = iterate._local_mlflow()
         self.assertIs(configured, store)
+
+
+@contextmanager
+def restored_llm_functions():
+    """Undoes the tracing wrappers the benchmark installs in ``llm``."""
+    with (
+        patch.object(llm.OllamaClient, "chat", llm.OllamaClient.chat),
+        patch.object(llm, "_edit_attempt", llm._edit_attempt),
+        patch.object(llm, "_similarity", llm._similarity),
+    ):
+        yield
+
+
+def cached_case_file(directory):
+    """A cases file of one case whose cached inputs match their SHA-256."""
+    speakers = json.dumps(MISATTRIBUTED_STAGE2).encode()
+    (directory / "02_speakers.json").write_bytes(speakers)
+    (directory / "sample.tsv").write_bytes(REFERENCE.encode())
+    entry = case_entry(directory, sha256(speakers)) | {
+        "reference_sha256": sha256(REFERENCE.encode()),
+        "end": 2,
+    }
+    cases_file = directory / "cases.json"
+    cases_file.write_text(json.dumps([entry]))
+    return cases_file
+
+
+class BenchmarkTests(unittest.TestCase):
+    def benchmarked(self):
+        """The run store and printed output of a benchmark of one cached case.
+
+        Every edit is rejected, so stage 3 keeps both speakers of stage 2.
+        """
+        store = LocalRunStore()
+        printed = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            local_tracking(store),
+            restored_llm_functions(),
+            served_by(FakeOllama(ScriptedModel(invalid_edits=llm.EDIT_ATTEMPTS))),
+            patch.object(iterate, "CASES_FILE", cached_case_file(Path(directory))),
+            redirect_stdout(printed),
+        ):
+            iterate.main()
+        return store, printed.getvalue()
+
+    def test_each_case_is_logged_with_the_served_model_digest(self):
+        store, _ = self.benchmarked()
+        self.assertEqual(store.runs["case"]["params"]["model_digest"], DIGEST)
+
+    def test_each_logged_run_is_printed_as_a_table(self):
+        store, printed = self.benchmarked()
+        table = iterate.format_table(store.runs["case"]["metrics"]).splitlines()
+        self.assertEqual(printed.splitlines()[-len(table) :], table)
+
+
+class LlmTracingTests(unittest.TestCase):
+    def test_every_chat_edit_attempt_and_wording_check_is_traced(self):
+        store = LocalRunStore()
+        with restored_llm_functions(), served_by(FakeOllama()):
+            iterate._trace_llm_calls(store)
+            llm.enhance(MISATTRIBUTED_STAGE2, lambda _message: None)
+        self.assertEqual(
+            set(store.spans),
+            {
+                ("chat", "LLM"),
+                ("_edit_attempt", DEFAULT_SPAN_TYPE),
+                ("_similarity", DEFAULT_SPAN_TYPE),
+            },
+        )
 
 
 class AppIsolationTests(unittest.TestCase):

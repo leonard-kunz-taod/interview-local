@@ -21,7 +21,7 @@ include = ["interview_local*"]
 extend-exclude = [".claude"]
 
 [tool.mutmut]
-source_paths = ["interview_local/"]
+source_paths = ["interview_local/", "benchmark/"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Run ad hoc, outside the project environment:
 #   uv run --no-sync --with mutmut --with pytest mutmut run "<glob>"
