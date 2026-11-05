@@ -23,7 +23,7 @@ from interview_local.llm import (
 DOWNLOAD_NOTICE = (
     f"Downloading {MODEL} from the Ollama registry (no HF account needed) …"
 )
-EDITOR_OPTIONS = {"temperature": 0.1, "num_ctx": 8192, "num_predict": 3072}
+EDITOR_OPTIONS = {"temperature": 0, "num_ctx": 8192, "num_predict": 3072}
 ERROR_DETAIL_BYTES = 2000
 
 
@@ -333,6 +333,14 @@ class RequestEnvelopeContractTests(unittest.TestCase):
     def test_every_request_body_is_declared_json(self):
         content_types = {r["content_type"] for r in self.session() if r["body"]}
         self.assertEqual(content_types, {"application/json"})
+
+    def test_every_chat_request_decodes_at_temperature_0(self):
+        temperatures = {
+            (r["body"]["messages"][0]["content"], r["body"]["options"]["temperature"])
+            for r in self.session()
+            if r["path"] == "/api/chat"
+        }
+        self.assertEqual(temperatures, {(EDIT_PROMPT, 0), (REVIEW_PROMPT, 0)})
 
     def test_unload_request_drops_the_model_from_memory(self):
         unloads = [r["body"] for r in self.session() if r["path"] == "/api/generate"]

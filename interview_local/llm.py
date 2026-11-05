@@ -109,6 +109,7 @@ EDIT_CHUNK_WORDS = 120
 CONTEXT_WORDS = 12
 EDIT_ATTEMPTS = 2
 MIN_WORDING_SIMILARITY = 0.85
+TEMPERATURE = 0
 MAX_PARAGRAPH_WORDS = 120
 JOIN_PAUSE_SECONDS = 2
 JOIN_SPAN_SECONDS = 60
@@ -199,7 +200,11 @@ class OllamaClient:
                     {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
                 ],
                 "format": schema,
-                "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 3072},
+                "options": {
+                    "temperature": TEMPERATURE,
+                    "num_ctx": 8192,
+                    "num_predict": 3072,
+                },
                 "keep_alive": "5m",
             },
             timeout=REQUEST_TIMEOUT_SECONDS,

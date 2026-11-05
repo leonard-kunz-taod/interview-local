@@ -165,6 +165,23 @@ uv run --frozen interview-local --help
 
 The public [CALLHOME German sample](https://catalog.ldc.upenn.edu/LDC2026S06) is downloadable separately with `tools/fetch_test_sample.py test_data/callhome`. It is not bundled in either app ZIP. Convert its FLAC to WAV with a separately installed FFmpeg if necessary. The scorer uses `--offset 119 --start 0.71 --end 103.22` for this sample only. Reference normalization and historical results are in [TEST_REPORT.md](TEST_REPORT.md) and `benchmark/comparison.json`.
 
+### LLM benchmark
+
+The benchmark runs only the LLM readability stage on the cached speaker transcripts listed in `benchmark/cases.json` (`test_data/callhome/02_speakers.json`); it does not transcribe or diarize again. It needs the reference TSV and a running Ollama with Ministral prepared:
+
+```bash
+uv run python tools/fetch_test_sample.py test_data/callhome
+uv run --group eval python benchmark/iterate.py
+```
+
+It prints WER and cpWER of stage 2 and stage 3 with their delta, the rejected chunks, the changed paragraphs and the LLM runtime. If a cached file differs from its recorded SHA-256, it stops before the first LLM call. Each run is logged locally with MLflow to `.mlflow/` (SQLite, telemetry disabled): parameters such as prompt hash, temperature, similarity threshold, chunk size and model digest, the printed metrics, and one trace per LLM edit attempt with request, response, duration and rejection reason. MLflow is installed only with `--group eval`; the app does not use it. Browse the runs with:
+
+```bash
+uvx --from mlflow mlflow ui --backend-store-uri sqlite:///.mlflow/mlflow.db
+```
+
+`uvx` downloads MLflow from PyPI the first time.
+
 The source lives in the private repository [leonard-kunz-taod/interview-local](https://github.com/leonard-kunz-taod/interview-local). `.gitignore` excludes `models/`, caches, environments, token files, audio and default transcript outputs. The source-only ZIP contains no model weights.
 
 ## Sources and licenses

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from support.fake_ollama import FakeOllama, ScriptedModel, served_by
 from support.platform_encoding import windows_default_encoding
 
 from interview_local import evaluate
@@ -20,6 +21,7 @@ from interview_local.evaluate import (
     normalize,
     score,
 )
+from interview_local.llm import enhance
 
 REFERENCE = (
     "Beg\tEnd\tSpeaker\tText\n"
@@ -212,16 +214,115 @@ class ScoreTests(unittest.TestCase):
 
 
 KEYS_OF_WINDOW = ("reference_offset_seconds", "evaluated_start", "evaluated_end")
+SPEAKERS = {"A": "Speaker A", "B": "Speaker B"}
+SPEAKER_METRICS = ("word_errors", "wer", "cpwer")
+
+
+def speaker_transcript(words):
+    """A stage-2 transcript of the given words, numbered in order."""
+    return {
+        "stage": "speakers",
+        "speakers": SPEAKERS,
+        "words": [dict(w, word_id=i) for i, w in enumerate(words)],
+        "diarization": TURNS,
+    }
+
+
+def readable_transcript(source, *paragraphs):
+    """A stage-3 transcript of (speaker, text, source word ids) paragraphs."""
+    return {
+        "stage": "readable",
+        "source_transcript": source,
+        "paragraphs": [
+            {"speaker": speaker, "text": text, "source_word_ids": list(ids)}
+            for speaker, text, ids in paragraphs
+        ],
+    }
+
+
+def speaker_metrics(report):
+    return {key: report[key] for key in SPEAKER_METRICS}
+
+
+class ReadableScoreTests(unittest.TestCase):
+    def test_readable_transcript_gets_wer_and_cpwer_but_no_der(self):
+        source = speaker_transcript(WORDS)
+        readable = readable_transcript(
+            source, ("A", "Guten Tag.", [0, 1]), ("B", "Hallo. Danach", [2, 3])
+        )
+        report = scored(readable)
+        self.assertEqual(
+            (word_error_summary(report), report["cpwer"], "der" in report),
+            (EXPECTED_WER, 0.25, False),
+        )
+
+    def test_readable_of_rejected_edits_scores_like_its_source(self):
+        source = speaker_transcript(
+            [
+                spoken("guten", 0, 0.5),
+                spoken("Tag.", 0.5, 1),
+                spoken("Hallo,", 1, 1.4, speaker="B"),
+                spoken("Welt", 1.4, 1.8, speaker=None),
+                spoken("Danach", 2.5, 3, speaker="B"),
+            ]
+        )
+        with served_by(FakeOllama(ScriptedModel(invalid_edits=2))):
+            readable = enhance(source, lambda _message: None)
+        self.assertEqual(
+            speaker_metrics(scored(readable)), speaker_metrics(scored(source))
+        )
+
+    def test_paragraph_given_to_the_right_speaker_lowers_cpwer_and_keeps_wer(self):
+        source = speaker_transcript(
+            [
+                spoken("Guten", 0, 0.5),
+                spoken("Tag", 0.5, 1),
+                spoken("Hallo", 1, 1.5),
+                spoken("Welt", 1.5, 2, speaker="B"),
+            ]
+        )
+        corrected = readable_transcript(
+            source, ("A", "Guten Tag", [0, 1]), ("B", "Hallo Welt", [2, 3])
+        )
+        before, after = scored(source), scored(corrected)
+        self.assertEqual(
+            ((before["wer"], before["cpwer"]), (after["wer"], after["cpwer"])),
+            ((0.0, 0.5), (0.0, 0.0)),
+        )
+
+    def test_inserted_word_takes_the_time_of_the_preceding_source_word(self):
+        source = speaker_transcript([spoken("Tag", 0.5, 1), spoken("Danach", 2.5, 3)])
+        readable = readable_transcript(source, ("A", "Tag, ja, danach", [0, 1]))
+        report = scored(readable, start=0, end=2)
+        self.assertEqual(report["hypothesis_words"], len(["tag", "ja"]))
+
+    def test_inserted_first_word_takes_the_time_of_the_paragraphs_first_word(self):
+        source = speaker_transcript([spoken("Guten", 0, 0.5), spoken("Hallo", 1, 1.5)])
+        readable = readable_transcript(
+            source, ("A", "Guten", [0]), ("B", "Ja, hallo", [1])
+        )
+        report = scored(readable, start=1, end=2)
+        self.assertEqual(report["hypothesis_words"], len(["ja", "hallo"]))
+
+    def test_paragraph_text_without_words_contributes_none(self):
+        source = speaker_transcript([spoken("Guten", 0, 0.5), spoken("…", 0.5, 1)])
+        readable = readable_transcript(source, ("A", "Guten", [0]), ("A", "…", [1]))
+        report = scored(readable)
+        self.assertEqual(report["hypothesis_words"], len(["guten"]))
 
 
 class CommandLineTests(unittest.TestCase):
-    def evaluate(self, *extra, window=("--offset", "10", "--end", "2")):
+    def evaluate(
+        self, *extra, window=("--offset", "10", "--end", "2"), hypothesis=None
+    ):
         """Printed report and the files left in the working directory."""
         with tempfile.TemporaryDirectory() as directory:
             reference_file = Path(directory) / "reference.tsv"
             hypothesis_file = Path(directory) / "hypothesis.json"
             reference_file.write_text(REFERENCE, encoding="utf-8")
-            hypothesis_file.write_text(json.dumps({"words": WORDS}), encoding="utf-8")
+            hypothesis_file.write_text(
+                json.dumps(hypothesis or {"words": WORDS}), encoding="utf-8"
+            )
             arguments = [reference_file, hypothesis_file, *window, *extra]
             printed = io.StringIO()
             with (
@@ -246,6 +347,18 @@ class CommandLineTests(unittest.TestCase):
     def test_report_is_printed_with_two_space_indentation(self):
         printed, _ = self.evaluate()
         self.assertEqual(printed, json.dumps(json.loads(printed), indent=2) + "\n")
+
+    def test_readable_transcript_is_scored_from_the_command_line(self):
+        readable = readable_transcript(
+            speaker_transcript(WORDS),
+            ("A", "Guten Tag.", [0, 1]),
+            ("B", "Hallo. Danach", [2, 3]),
+        )
+        printed, _ = self.evaluate(hypothesis=readable)
+        report = json.loads(printed)
+        self.assertEqual(
+            (word_error_summary(report), report["cpwer"]), (EXPECTED_WER, 0.25)
+        )
 
     def test_report_is_saved_to_the_output_file(self):
         printed, files = self.evaluate("--output", "report.json")

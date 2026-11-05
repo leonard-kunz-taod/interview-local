@@ -7,6 +7,9 @@ import json
 import re
 from pathlib import Path
 
+from .llm import source_words, tokens
+from .word_alignment import align_text_to_source
+
 DER_COLLAR_SECONDS = 0.25
 NORMALIZATION = (
     "Lowercase Unicode words/numbers; punctuation and noise "
@@ -54,7 +57,29 @@ def score(
 
     Args:
         reference_file: CALLHOME TSV with Beg, End, Speaker and Text columns.
-        hypothesis_file: Raw or speaker transcript JSON produced by the app.
+        hypothesis_file: Raw, speaker or readable transcript JSON produced by the app.
+        offset: Original-recording offset subtracted from reference timestamps.
+        start: Window start in seconds.
+        end: Window end in seconds.
+
+    Raises:
+        ValueError: The window holds no reference words.
+    """
+    hypothesis = json.loads(hypothesis_file.read_text(encoding="utf-8"))
+    return score_transcript(reference_file, hypothesis, offset, start, end)
+
+
+def score_transcript(
+    reference_file: Path, hypothesis: dict, offset: float, start: float, end: float
+) -> dict:
+    """WER inside one time window; DER with diarization; cpWER with speakers.
+
+    A readable transcript gets WER and cpWER but no DER: its paragraphs carry
+    speakers, not diarization turns.
+
+    Args:
+        reference_file: CALLHOME TSV with Beg, End, Speaker and Text columns.
+        hypothesis: Raw, speaker or readable transcript produced by the app.
         offset: Original-recording offset subtracted from reference timestamps.
         start: Window start in seconds.
         end: Window end in seconds.
@@ -65,7 +90,6 @@ def score(
     with reference_file.open(encoding="utf-8") as table:
         rows = list(csv.DictReader(table, delimiter="\t"))
     reference = _reference_utterances(rows, offset, start, end)
-    hypothesis = json.loads(hypothesis_file.read_text(encoding="utf-8"))
     hyp = _hypothesis_words(hypothesis, start, end)
     report = _word_errors(reference, hyp)
     report.update(
@@ -77,15 +101,23 @@ def score(
             "caveat": CAVEAT,
         }
     )
+    if hypothesis.get("stage") == "readable":
+        _add_cpwer(report, reference, hyp)
+        return report
     if hypothesis.get("diarization") is None:
         return report
     report["der"] = _diarization_error(reference, hypothesis["diarization"], start, end)
     report["der_conditions"] = DER_CONDITIONS
+    _add_cpwer(report, reference, hyp)
+    return report
+
+
+def _add_cpwer(report: dict, reference: list[dict], hyp: list[dict]) -> None:
+    """cpWER, when reference and hypothesis both have exactly two speakers."""
     ref_ids, hyp_ids = _speaker_ids(reference), _speaker_ids(hyp)
     if len(ref_ids) == len(hyp_ids) == 2:
         errors = _speaker_permuted_errors(reference, hyp, ref_ids, hyp_ids)
         report["cpwer"] = errors / report["reference_words"]
-    return report
 
 
 def normalize(text: str) -> list[str]:
@@ -136,11 +168,52 @@ def _hypothesis_words(hypothesis: dict, start: float, end: float) -> list[dict]:
 
 
 def _transcript_words(hypothesis: dict) -> list[dict]:
-    """The word list of a speaker transcript, or the segment words of a raw one."""
+    """The words of a readable transcript's paragraphs, the word list of a speaker
+    transcript, or the segment words of a raw one."""
+    if hypothesis.get("stage") == "readable":
+        return _readable_words(hypothesis)
     words = hypothesis.get("words")
     if words is not None:
         return words
     return [w for s in hypothesis["segments"] for w in s.get("words", [])]
+
+
+def _readable_words(readable: dict) -> list[dict]:
+    """Paragraph words, timed by the source words they were aligned to."""
+    words = source_words(readable["source_transcript"])
+    return [
+        word
+        for paragraph in readable["paragraphs"]
+        for word in _paragraph_words(paragraph, words)
+    ]
+
+
+def _paragraph_words(paragraph: dict, words: list[dict]) -> list[dict]:
+    """Display words of one paragraph with the times of their source words.
+
+    A word the editor inserted takes the times of the preceding source word, or
+    of the paragraph's first source word when nothing precedes it. A paragraph
+    text without word tokens contributes no words.
+    """
+    if not tokens(paragraph["text"]):
+        return []
+    selected = [words[i] for i in paragraph["source_word_ids"]]
+    by_id = {w["word_id"]: w for w in selected}
+    preceding = selected[0]
+    timed = []
+    for display_word in align_text_to_source(paragraph["text"], selected):
+        ids = display_word.source_word_ids
+        first, last = (by_id[ids[0]], by_id[ids[-1]]) if ids else (preceding, preceding)
+        preceding = last
+        timed.append(
+            {
+                "text": display_word.text,
+                "start": first["start"],
+                "end": last["end"],
+                "speaker": paragraph["speaker"],
+            }
+        )
+    return timed
 
 
 def _word_errors(reference: list[dict], hyp: list[dict]) -> dict:
